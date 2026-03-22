@@ -78,7 +78,14 @@ class _EditorScreenState extends State<EditorScreen> {
       final archive = UdfArchive.fromBytes(bytes);
       final udfDoc = UdfParser.parse(archive.contentXml);
 
-      final quillDoc = UdfDeltaConverter.toQuillDocument(udfDoc);
+      Document quillDoc;
+      try {
+        quillDoc = UdfDeltaConverter.toQuillDocument(udfDoc);
+      } catch (e) {
+        // Delta conversion failed — fall back to plain text editing
+        debugPrint('Delta conversion failed, falling back to plain text: $e');
+        quillDoc = Document()..insert(0, udfDoc.text);
+      }
 
       _originalDoc = udfDoc;
       _originalArchive = archive;
