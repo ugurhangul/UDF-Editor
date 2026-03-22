@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
@@ -294,8 +295,15 @@ class _EditorScreenState extends State<EditorScreen> {
               const SizedBox(height: 24),
               if (PaywallService.instance.isFree)
                 FilledButton.icon(
-                  onPressed: () {
-                    // TODO: Show paywall
+                  onPressed: () async {
+                    final result = await PaywallService.instance.presentPaywallIfNeeded();
+                    if (result == PaywallResult.purchased && mounted) {
+                      setState(() {
+                        _error = null;
+                        _isLoading = true;
+                      });
+                      _initEditor();
+                    }
                   },
                   icon: const Icon(Icons.star),
                   label: const Text('Pro\'ya Yükselt'),
