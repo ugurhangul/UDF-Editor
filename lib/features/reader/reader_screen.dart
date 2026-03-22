@@ -79,6 +79,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
               padding: const EdgeInsets.only(right: 4),
               child: _buildSignatureBadge(colorScheme),
             ),
+          // Sign document
+          if (_archive != null && !(_archive!.isSigned))
+            IconButton(
+              icon: const Icon(Icons.draw_outlined),
+              onPressed: () {
+                context.pushNamed(
+                  'signing',
+                  queryParameters: {'path': widget.filePath},
+                );
+              },
+              tooltip: 'İmzala',
+            ),
+          // Edit document
+          if (!_isLoading && _error == null)
+            IconButton(
+              icon: const Icon(Icons.edit_outlined),
+              onPressed: () {
+                context.pushNamed(
+                  'editor',
+                  queryParameters: {'path': widget.filePath},
+                );
+              },
+              tooltip: 'Düzenle',
+            ),
           // Share
           IconButton(
             icon: const Icon(Icons.share_outlined),
@@ -93,18 +117,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
           const AdBannerWidget(),
         ],
       ),
-      floatingActionButton: !_isLoading && _error == null
-          ? FloatingActionButton.extended(
-              onPressed: () {
-                context.pushNamed(
-                  'editor',
-                  queryParameters: {'path': widget.filePath},
-                );
-              },
-              icon: const Icon(Icons.edit_outlined),
-              label: const Text('Düzenle'),
-            )
-          : null,
     );
   }
 
