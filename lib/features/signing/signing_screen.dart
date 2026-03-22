@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -9,6 +11,7 @@ import '../../core/crypto/nfc_smart_card_signer.dart';
 import '../../core/crypto/mobil_imza_signer.dart';
 import '../../core/crypto/usb_otg_signer.dart';
 import '../../core/crypto/cades_builder.dart';
+import '../../core/udf/udf_archive.dart';
 
 /// Signing method selection and execution screen.
 ///
@@ -537,11 +540,12 @@ class _SigningScreenState extends State<SigningScreen> {
     try {
       final signer = _signers[method]!;
 
-      // Read content.xml from the UDF archive
-      // TODO: Integrate with UDF archive reader to extract content.xml bytes
-      final contentXmlBytes = Uint8List.fromList(
-        '<placeholder>Content will be loaded from ${widget.filePath}</placeholder>'.codeUnits,
-      );
+      // Read UDF archive and extract content.xml as UTF-8 bytes
+      setState(() => _statusMessage = 'Belge okunuyor...');
+      final file = File(widget.filePath);
+      final fileBytes = await file.readAsBytes();
+      final archive = UdfArchive.fromBytes(fileBytes);
+      final contentXmlBytes = Uint8List.fromList(utf8.encode(archive.contentXml));
 
       if (method == SigningMethod.nfcIdCard || method == SigningMethod.nfcSmartCard) {
         setState(() => _statusMessage = 'Kartınızı telefona yaklaştırın...');
@@ -554,15 +558,30 @@ class _SigningScreenState extends State<SigningScreen> {
       // Build CAdES envelope
       setState(() => _statusMessage = 'CAdES imza zarfı oluşturuluyor...');
       final builder = CadesBuilder();
-      await builder.buildSignedData(
+      final signatureBytes = await builder.buildSignedData(
         contentXmlBytes: contentXmlBytes,
         signingResult: result,
       );
 
-      // TODO: Write sign.sgn to the UDF archive
+      // Write sign.sgn into the UDF archive and save
+      setState(() => _statusMessage = 'İmza dosyaya yazılıyor...');
+      final signedArchiveBytes = UdfArchive.toBytes(
+        contentXml: archive.contentXml,
+        signatureBytes: signatureBytes,
+        propertiesXml: archive.propertiesXml,
+        otherFiles: archive.otherFiles,
+      );
+      await file.writeAsBytes(signedArchiveBytes, flush: true);
 
       if (mounted) {
         setState(() => _state = _SigningState.success);
+      }
+    } on UdfArchiveException catch (e) {
+      if (mounted) {
+        setState(() {
+          _state = _SigningState.error;
+          _errorMessage = 'Belge okunamadı: ${e.message}';
+        });
       }
     } on SigningException catch (e) {
       if (mounted) {
