@@ -41,6 +41,8 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _hasChanges = false;
   String? _error;
   String? _savePath;
+  final FocusNode _editorFocusNode = FocusNode();
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -198,6 +200,8 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void dispose() {
     _quillController.dispose();
+    _editorFocusNode.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -330,8 +334,10 @@ class _EditorScreenState extends State<EditorScreen> {
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: QuillEditor.basic(
+            child: QuillEditor(
               controller: _quillController,
+              focusNode: _editorFocusNode,
+              scrollController: _scrollController,
               config: QuillEditorConfig(
                 placeholder: 'Belge içeriğini buraya yazın...',
                 padding: const EdgeInsets.all(16),
