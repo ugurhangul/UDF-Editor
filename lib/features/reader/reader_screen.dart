@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../core/paywall/paywall_service.dart';
+
 import '../../app/theme.dart';
 import '../../core/udf/udf_archive.dart';
 import '../../core/udf/udf_document.dart';
@@ -79,11 +81,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
               padding: const EdgeInsets.only(right: 4),
               child: _buildSignatureBadge(colorScheme),
             ),
-          // Sign document
+          // Sign document (Pro feature)
           if (_archive != null && !(_archive!.isSigned))
             IconButton(
               icon: const Icon(Icons.draw_outlined),
-              onPressed: () {
+              onPressed: () async {
+                final allowed = await PaywallService.instance.requirePro();
+                if (!allowed || !context.mounted) return;
                 context.pushNamed(
                   'signing',
                   queryParameters: {'path': widget.filePath},
