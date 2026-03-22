@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
+import '../../core/paywall/paywall_service.dart';
+
 /// Reusable banner ad widget for UDFtör free tier.
 ///
 /// Displays an adaptive banner ad at the bottom of the screen.
@@ -24,6 +26,8 @@ class _AdBannerWidgetState extends State<AdBannerWidget> {
   @override
   void initState() {
     super.initState();
+    // Pro users don't see ads.
+    if (PaywallService.instance.isPro) return;
     // Delay ad loading to avoid blocking the first frame render.
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) _loadAd();
