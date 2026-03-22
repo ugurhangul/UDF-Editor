@@ -324,7 +324,7 @@ class _EditorScreenState extends State<EditorScreen> {
               showIndent: true,
               showClearFormat: true,
               showSearchButton: true,
-              multiRowsDisplay: false,
+              multiRowsDisplay: true,
               toolbarSize: AppTheme.udfFontSizeToLogical(12) * 3,
             ),
           ),
