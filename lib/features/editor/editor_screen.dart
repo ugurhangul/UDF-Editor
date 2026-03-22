@@ -84,8 +84,11 @@ class _EditorScreenState extends State<EditorScreen> {
       _originalArchive = archive;
       _savePath = widget.filePath;
 
-      // Extract the full text from the UDF document
-      _textController.text = udfDoc.text;
+      // Extract text with newlines at paragraph boundaries.
+      // UDF stores text as a flat CData string — paragraphs define ranges.
+      // We need to insert \n between paragraphs so _rebuildDocument can
+      // split them back correctly on save.
+      _textController.text = _extractTextWithNewlines(udfDoc);
 
       setState(() => _isLoading = false);
     } on UdfArchiveException catch (e) {
@@ -110,6 +113,43 @@ class _EditorScreenState extends State<EditorScreen> {
     if (!_hasChanges) {
       setState(() => _hasChanges = true);
     }
+  }
+
+  /// Extract text from a UDF document, inserting \n at paragraph boundaries.
+  ///
+  /// UDF stores all text in a single flat CData block with no newlines.
+  /// Paragraphs reference character ranges via startOffset/length.
+  /// This method reconstructs readable text with line breaks.
+  String _extractTextWithNewlines(UdfDocument doc) {
+    final buffer = StringBuffer();
+    final paragraphs = doc.allParagraphs;
+
+    for (var i = 0; i < paragraphs.length; i++) {
+      final para = paragraphs[i];
+
+      if (para.runs.isEmpty) {
+        // Empty paragraph → blank line
+      } else {
+        // Concatenate all runs in this paragraph
+        for (final run in para.runs) {
+          final start = run.startOffset;
+          final end = (start + run.length).clamp(0, doc.text.length);
+          if (start >= 0 && start < doc.text.length) {
+            buffer.write(doc.text.substring(start, end));
+          }
+        }
+      }
+
+      // Add newline between paragraphs (not after the last one)
+      if (i < paragraphs.length - 1) {
+        buffer.write('\n');
+      }
+    }
+
+    // Fallback: if no paragraphs, return the raw text
+    if (paragraphs.isEmpty) return doc.text;
+
+    return buffer.toString();
   }
 
   Future<void> _save() async {
@@ -160,33 +200,78 @@ class _EditorScreenState extends State<EditorScreen> {
 
   /// Rebuild a UDF document from edited plain text.
   ///
-  /// Creates a single body section with one paragraph per line,
-  /// preserving the original document's format settings.
+  /// Strategy:
+  /// 1. Split edited text into lines (one line = one paragraph).
+  /// 2. For each edited line, if a corresponding original paragraph exists,
+  ///    preserve its attributes (alignment, spacing, indents) and create runs
+  ///    that match the original formatting as closely as possible.
+  /// 3. If more lines than original paragraphs → new paragraphs with defaults.
+  /// 4. If fewer lines → drop extra original paragraphs.
+  /// 5. Recalculate all startOffset/length values for the flat CData.
   UdfDocument _rebuildDocument(String text) {
     final lines = text.split('\n');
+    final originalParagraphs = _originalDoc?.allParagraphs ?? [];
     final paragraphs = <UdfParagraph>[];
     var offset = 0;
 
-    for (final line in lines) {
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final hasOriginal = i < originalParagraphs.length;
+      final origPara = hasOriginal ? originalParagraphs[i] : null;
+
       if (line.isEmpty) {
-        paragraphs.add(const UdfParagraph(runs: []));
-      } else {
+        // Empty line → preserve original paragraph attributes if available
         paragraphs.add(UdfParagraph(
-          runs: [
-            UdfTextRun(
-              startOffset: offset,
-              length: line.length,
-              fontSize: 12,
-              fontFamily: 'Times New Roman',
-            ),
-          ],
+          runs: const [],
+          alignment: origPara?.alignment ?? UdfAlignment.left,
+          lineSpacing: origPara?.lineSpacing ?? 1.0,
+          spaceBefore: origPara?.spaceBefore ?? 0,
+          spaceAfter: origPara?.spaceAfter ?? 0,
+          leftIndent: origPara?.leftIndent ?? 0,
+          rightIndent: origPara?.rightIndent ?? 0,
+          firstLineIndent: origPara?.firstLineIndent ?? 0,
+          hangingIndent: origPara?.hangingIndent ?? 0,
+          styleName: origPara?.styleName,
         ));
+        continue;
       }
+
+      // Build runs for this line
+      List<UdfTextRun> runs;
+
+      if (origPara != null && origPara.runs.isNotEmpty) {
+        // Preserve original run formatting, reflow text across runs
+        runs = _reflowRuns(origPara.runs, offset, line.length);
+      } else {
+        // No original → single default run
+        runs = [
+          UdfTextRun(
+            startOffset: offset,
+            length: line.length,
+            fontSize: 12,
+            fontFamily: 'Times New Roman',
+          ),
+        ];
+      }
+
+      paragraphs.add(UdfParagraph(
+        runs: runs,
+        alignment: origPara?.alignment ?? UdfAlignment.left,
+        lineSpacing: origPara?.lineSpacing ?? 1.0,
+        spaceBefore: origPara?.spaceBefore ?? 0,
+        spaceAfter: origPara?.spaceAfter ?? 0,
+        leftIndent: origPara?.leftIndent ?? 0,
+        rightIndent: origPara?.rightIndent ?? 0,
+        firstLineIndent: origPara?.firstLineIndent ?? 0,
+        hangingIndent: origPara?.hangingIndent ?? 0,
+        styleName: origPara?.styleName,
+      ));
+
       offset += line.length;
     }
 
     // The full text without newlines (UDF stores text as a flat string)
-    final flatText = text.replaceAll('\n', '');
+    final flatText = lines.join();
 
     return UdfDocument(
       formatId: _originalDoc?.formatId ?? '1.7',
@@ -198,6 +283,124 @@ class _EditorScreenState extends State<EditorScreen> {
       styles: _originalDoc?.styles ?? {},
       properties: _originalDoc?.properties ?? {},
     );
+  }
+
+  /// Reflow text across original runs with new offset and total length.
+  ///
+  /// Distributes [newTotalLength] characters proportionally across the
+  /// original runs, preserving each run's formatting (bold, italic, font, etc).
+  /// If the text grew or shrank, the last run absorbs the difference.
+  List<UdfTextRun> _reflowRuns(
+    List<UdfTextRun> originalRuns,
+    int newStartOffset,
+    int newTotalLength,
+  ) {
+    if (originalRuns.length == 1) {
+      final orig = originalRuns.first;
+      return [
+        UdfTextRun(
+          startOffset: newStartOffset,
+          length: newTotalLength,
+          bold: orig.bold,
+          italic: orig.italic,
+          underline: orig.underline,
+          strikethrough: orig.strikethrough,
+          superscript: orig.superscript,
+          subscript: orig.subscript,
+          fontSize: orig.fontSize,
+          fontFamily: orig.fontFamily,
+          foregroundColor: orig.foregroundColor,
+          backgroundColor: orig.backgroundColor,
+          styleName: orig.styleName,
+        ),
+      ];
+    }
+
+    // Calculate the total original length
+    final origTotal = originalRuns.fold<int>(0, (sum, r) => sum + r.length);
+    if (origTotal == 0) {
+      // Degenerate case — all zero-length runs
+      final first = originalRuns.first;
+      return [
+        UdfTextRun(
+          startOffset: newStartOffset,
+          length: newTotalLength,
+          bold: first.bold,
+          italic: first.italic,
+          underline: first.underline,
+          strikethrough: first.strikethrough,
+          fontSize: first.fontSize,
+          fontFamily: first.fontFamily,
+          foregroundColor: first.foregroundColor,
+          backgroundColor: first.backgroundColor,
+          styleName: first.styleName,
+        ),
+      ];
+    }
+
+    // Distribute proportionally
+    final runs = <UdfTextRun>[];
+    var currentOffset = newStartOffset;
+    var remainingChars = newTotalLength;
+
+    for (var i = 0; i < originalRuns.length; i++) {
+      final orig = originalRuns[i];
+      final int runLength;
+
+      if (i == originalRuns.length - 1) {
+        // Last run takes whatever's left
+        runLength = remainingChars;
+      } else {
+        // Proportional distribution
+        runLength = (orig.length * newTotalLength / origTotal).round();
+      }
+
+      if (runLength <= 0) continue;
+
+      final actualLength = runLength.clamp(0, remainingChars);
+      if (actualLength <= 0) continue;
+
+      runs.add(UdfTextRun(
+        startOffset: currentOffset,
+        length: actualLength,
+        bold: orig.bold,
+        italic: orig.italic,
+        underline: orig.underline,
+        strikethrough: orig.strikethrough,
+        superscript: orig.superscript,
+        subscript: orig.subscript,
+        fontSize: orig.fontSize,
+        fontFamily: orig.fontFamily,
+        foregroundColor: orig.foregroundColor,
+        backgroundColor: orig.backgroundColor,
+        styleName: orig.styleName,
+      ));
+
+      currentOffset += actualLength;
+      remainingChars -= actualLength;
+    }
+
+    // Safety: if proportional distribution didn't cover all chars
+    if (remainingChars > 0 && runs.isNotEmpty) {
+      final last = runs.removeLast();
+      runs.add(UdfTextRun(
+        startOffset: last.startOffset,
+        length: last.length + remainingChars,
+        bold: last.bold,
+        italic: last.italic,
+        underline: last.underline,
+        strikethrough: last.strikethrough,
+        superscript: last.superscript,
+        subscript: last.subscript,
+        fontSize: last.fontSize,
+        fontFamily: last.fontFamily,
+        foregroundColor: last.foregroundColor,
+        backgroundColor: last.backgroundColor,
+        styleName: last.styleName,
+      ));
+    }
+
+    return runs;
   }
 
   String _generateSavePath() {
