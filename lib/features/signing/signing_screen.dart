@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -526,7 +527,9 @@ class _SigningScreenState extends State<SigningScreen> {
       final signer = _signers[SigningMethod.nfcIdCard]! as NfcIdCardSigner;
       final status = await signer.checkPinStatus().timeout(
         const Duration(seconds: 30),
-        onTimeout: () => const PinStatus.unknown(),
+        onTimeout: () {
+          throw TimeoutException('NFC zaman aşımı');
+        },
       );
 
       if (!mounted || _state != _SigningState.checkingPin) return;
@@ -559,13 +562,28 @@ class _SigningScreenState extends State<SigningScreen> {
                 'Lütfen TC Kimlik kartınızı kullandığınızdan emin olun.';
           });
         case PinState.unknown:
-          // Proceed anyway — card might still work
-          setState(() => _state = _SigningState.enterPin);
+          setState(() {
+            _state = _SigningState.error;
+            _errorMessage = 'Kart okunamadı.\n'
+                'Kartınızı telefona yaklaştırıp tekrar deneyin.';
+          });
+      }
+    } on TimeoutException {
+      if (mounted && _state == _SigningState.checkingPin) {
+        _cancelPinCheck();
+        setState(() {
+          _state = _SigningState.error;
+          _errorMessage = 'Kart algılanamadı — süre doldu.\n'
+              'Kartınızı telefonun NFC antenine yaklaştırıp tekrar deneyin.';
+        });
       }
     } catch (e) {
       if (mounted && _state == _SigningState.checkingPin) {
-        // On error, proceed to PIN entry — don't block the user
-        setState(() => _state = _SigningState.enterPin);
+        setState(() {
+          _state = _SigningState.error;
+          _errorMessage = 'NFC iletişim hatası: $e\n'
+              'Kartınızı sabit tutup tekrar deneyin.';
+        });
       }
     }
   }
