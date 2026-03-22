@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../../core/crypto/models.dart';
 import '../../core/crypto/signing_service.dart';
 import '../../core/crypto/nfc_id_card_signer.dart';
+import '../../core/crypto/nfc_bridge.dart';
 import '../../core/crypto/nfc_smart_card_signer.dart';
 import '../../core/crypto/mobil_imza_signer.dart';
 import '../../core/crypto/usb_otg_signer.dart';
@@ -523,9 +524,12 @@ class _SigningScreenState extends State<SigningScreen> {
   Future<void> _checkPinForNfc() async {
     try {
       final signer = _signers[SigningMethod.nfcIdCard]! as NfcIdCardSigner;
-      final status = await signer.checkPinStatus();
+      final status = await signer.checkPinStatus().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => const PinStatus.unknown(),
+      );
 
-      if (!mounted) return;
+      if (!mounted || _state != _SigningState.checkingPin) return;
 
       switch (status.state) {
         case PinState.active:
@@ -559,11 +563,24 @@ class _SigningScreenState extends State<SigningScreen> {
           setState(() => _state = _SigningState.enterPin);
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && _state == _SigningState.checkingPin) {
         // On error, proceed to PIN entry — don't block the user
         setState(() => _state = _SigningState.enterPin);
       }
     }
+  }
+
+  void _cancelPinCheck() {
+    // Stop the NFC session so it doesn't keep polling
+    final signer = _signers[SigningMethod.nfcIdCard];
+    if (signer is NfcIdCardSigner) {
+      // Access the bridge to stop session — use a fresh NfcBridge
+      // since the signer's bridge is private
+      NfcBridge().stopSession().catchError((_) {});
+    }
+    setState(() {
+      _state = _SigningState.selectMethod;
+    });
   }
 
   Widget _buildCheckingPin(ColorScheme colorScheme) {
@@ -598,11 +615,25 @@ class _SigningScreenState extends State<SigningScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 32),
-            TextButton(
-              onPressed: () => setState(() {
-                _state = _SigningState.selectMethod;
-              }),
-              child: const Text('İptal'),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                TextButton(
+                  onPressed: _cancelPinCheck,
+                  child: const Text('İptal'),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton(
+                  onPressed: () {
+                    // Skip PIN check, go directly to PIN entry
+                    _cancelPinCheck();
+                    setState(() {
+                      _state = _SigningState.enterPin;
+                    });
+                  },
+                  child: const Text('Kontrolü Atla'),
+                ),
+              ],
             ),
           ],
         ),
