@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ui';
 
 import 'package:xml/xml.dart';
@@ -29,6 +30,9 @@ class UdfParser {
     // -- Extract CData text from <content> --
     final text = _extractCDataText(root);
 
+    // -- Build byte→char offset map for UTF-8 byte offset conversion --
+    final byteToChar = _buildByteToCharMap(text);
+
     // -- Parse <properties> --
     final pageFormat = _parsePageFormat(root);
 
@@ -42,7 +46,7 @@ class UdfParser {
     if (headerEl != null) {
       sections.add(UdfSection(
         type: UdfSectionType.header,
-        paragraphs: _parseParagraphs(headerEl),
+        paragraphs: _parseParagraphs(headerEl, byteToChar, text.length),
       ));
     }
 
@@ -50,7 +54,7 @@ class UdfParser {
     if (elementsEl != null) {
       sections.add(UdfSection(
         type: UdfSectionType.body,
-        paragraphs: _parseParagraphs(elementsEl),
+        paragraphs: _parseParagraphs(elementsEl, byteToChar, text.length),
       ));
     }
 
@@ -58,14 +62,14 @@ class UdfParser {
     if (footerEl != null) {
       sections.add(UdfSection(
         type: UdfSectionType.footer,
-        paragraphs: _parseParagraphs(footerEl),
+        paragraphs: _parseParagraphs(footerEl, byteToChar, text.length),
       ));
     }
 
     // If no <elements>, try to parse paragraphs from root directly
     if (sections.isEmpty ||
         sections.every((s) => s.type != UdfSectionType.body)) {
-      final rootParagraphs = _parseParagraphs(root);
+      final rootParagraphs = _parseParagraphs(root, byteToChar, text.length);
       if (rootParagraphs.isNotEmpty) {
         sections.add(UdfSection(
           type: UdfSectionType.body,
@@ -168,11 +172,15 @@ class UdfParser {
   // Paragraphs
   // ---------------------------------------------------------------------------
 
-  static List<UdfParagraph> _parseParagraphs(XmlElement parent) {
+  static List<UdfParagraph> _parseParagraphs(
+    XmlElement parent,
+    Map<int, int> byteToChar,
+    int textLength,
+  ) {
     final paragraphs = <UdfParagraph>[];
 
     for (final pEl in parent.findElements('paragraph')) {
-      final runs = _parseTextRuns(pEl);
+      final runs = _parseTextRuns(pEl, byteToChar, textLength);
 
       paragraphs.add(UdfParagraph(
         runs: runs,
@@ -195,18 +203,29 @@ class UdfParser {
   // Text runs
   // ---------------------------------------------------------------------------
 
-  static List<UdfTextRun> _parseTextRuns(XmlElement paragraph) {
+  static List<UdfTextRun> _parseTextRuns(
+    XmlElement paragraph,
+    Map<int, int> byteToChar,
+    int textLength,
+  ) {
     final runs = <UdfTextRun>[];
 
     for (final cEl in paragraph.findElements('content')) {
-      final startOffset = _intAttr(cEl, 'startOffset', -1);
-      final length = _intAttr(cEl, 'length', -1);
+      final byteStart = _intAttr(cEl, 'startOffset', -1);
+      final byteLength = _intAttr(cEl, 'length', -1);
 
-      if (startOffset < 0 || length < 0) continue;
+      if (byteStart < 0 || byteLength < 0) continue;
+
+      // Convert byte offsets to character offsets
+      final charStart = _byteOffsetToChar(byteToChar, byteStart, textLength);
+      final charEnd = _byteOffsetToChar(byteToChar, byteStart + byteLength, textLength);
+      final charLength = charEnd - charStart;
+
+      if (charLength <= 0) continue;
 
       runs.add(UdfTextRun(
-        startOffset: startOffset,
-        length: length,
+        startOffset: charStart,
+        length: charLength,
         bold: _boolAttr(cEl, 'bold'),
         italic: _boolAttr(cEl, 'italic'),
         underline: _boolAttr(cEl, 'underline'),
@@ -222,6 +241,71 @@ class UdfParser {
     }
 
     return runs;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Byte↔Char offset conversion
+  // ---------------------------------------------------------------------------
+
+  /// Build a map from UTF-8 byte offset → Dart string character offset.
+  ///
+  /// UDF XML stores startOffset/length as UTF-8 byte positions.
+  /// Dart strings use UTF-16 code units (characters). For text with
+  /// multi-byte characters (İ, Ş, Ö, Ü, ğ, ç) the offsets diverge.
+  static Map<int, int> _buildByteToCharMap(String text) {
+    final bytes = utf8.encode(text);
+    final map = <int, int>{};
+    var byteIndex = 0;
+    var charIndex = 0;
+
+    // Map byte position 0
+    map[0] = 0;
+
+    while (charIndex < text.length && byteIndex < bytes.length) {
+      final codeUnit = text.codeUnitAt(charIndex);
+      int byteCount;
+
+      if (codeUnit <= 0x7F) {
+        byteCount = 1;
+      } else if (codeUnit <= 0x7FF) {
+        byteCount = 2;
+      } else if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+        // Surrogate pair (4-byte UTF-8)
+        byteCount = 4;
+        charIndex++; // skip low surrogate
+      } else {
+        byteCount = 3;
+      }
+
+      byteIndex += byteCount;
+      charIndex++;
+      map[byteIndex] = charIndex;
+    }
+
+    return map;
+  }
+
+  /// Convert a UTF-8 byte offset to a character offset using the prebuilt map.
+  /// Falls back to nearest lower mapped byte offset if exact match not found.
+  static int _byteOffsetToChar(
+    Map<int, int> byteToChar,
+    int byteOffset,
+    int textLength,
+  ) {
+    if (byteOffset <= 0) return 0;
+
+    // Exact match
+    final exact = byteToChar[byteOffset];
+    if (exact != null) return exact.clamp(0, textLength);
+
+    // Find nearest lower byte offset (handles edge cases)
+    var nearest = 0;
+    for (final key in byteToChar.keys) {
+      if (key <= byteOffset && key > nearest) {
+        nearest = key;
+      }
+    }
+    return (byteToChar[nearest] ?? 0).clamp(0, textLength);
   }
 
   // ---------------------------------------------------------------------------

@@ -7,11 +7,14 @@ import 'udf_document.dart';
 /// Serializes a [UdfDocument] back to content.xml format.
 ///
 /// Used in Phase 2 (Editor) for saving edited documents.
-/// Phase 1 provides this as a working stub for roundtrip testing.
+/// Converts character offsets back to UTF-8 byte offsets for UYAP compat.
 class UdfSerializer {
   /// Serialize a [UdfDocument] to content.xml XML string.
   static String serialize(UdfDocument document) {
     final builder = XmlBuilder();
+
+    // Build char→byte offset map for converting back to UTF-8 byte offsets
+    final charToByte = _buildCharToByteMap(document.text);
 
     builder.processing('xml', 'version="1.0" encoding="UTF-8"');
 
@@ -39,7 +42,7 @@ class UdfSerializer {
 
         builder.element(tagName, nest: () {
           for (final para in section.paragraphs) {
-            _serializeParagraph(builder, para);
+            _serializeParagraph(builder, para, charToByte);
           }
         });
       }
@@ -87,7 +90,11 @@ class UdfSerializer {
     });
   }
 
-  static void _serializeParagraph(XmlBuilder builder, UdfParagraph para) {
+  static void _serializeParagraph(
+    XmlBuilder builder,
+    UdfParagraph para,
+    Map<int, int> charToByte,
+  ) {
     final attrs = <String, String>{};
 
     if (para.alignment != UdfAlignment.left) {
@@ -120,15 +127,25 @@ class UdfSerializer {
 
     builder.element('paragraph', attributes: attrs, nest: () {
       for (final run in para.runs) {
-        _serializeTextRun(builder, run);
+        _serializeTextRun(builder, run, charToByte);
       }
     });
   }
 
-  static void _serializeTextRun(XmlBuilder builder, UdfTextRun run) {
+  static void _serializeTextRun(
+    XmlBuilder builder,
+    UdfTextRun run,
+    Map<int, int> charToByte,
+  ) {
+    // Convert character offsets back to byte offsets
+    final byteStart = charToByte[run.startOffset] ?? run.startOffset;
+    final byteEnd = charToByte[run.startOffset + run.length] ??
+        (run.startOffset + run.length);
+    final byteLength = byteEnd - byteStart;
+
     final attrs = <String, String>{
-      'startOffset': run.startOffset.toString(),
-      'length': run.length.toString(),
+      'startOffset': byteStart.toString(),
+      'length': byteLength.toString(),
       'size': run.fontSize.toString(),
       'family': run.fontFamily,
     };
@@ -150,6 +167,39 @@ class UdfSerializer {
     }
 
     builder.element('content', attributes: attrs);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Char→Byte offset map
+  // ---------------------------------------------------------------------------
+
+  /// Build a map from character offset → UTF-8 byte offset.
+  static Map<int, int> _buildCharToByteMap(String text) {
+    final map = <int, int>{};
+    var byteIndex = 0;
+
+    map[0] = 0;
+
+    for (var i = 0; i < text.length; i++) {
+      final codeUnit = text.codeUnitAt(i);
+      int byteCount;
+
+      if (codeUnit <= 0x7F) {
+        byteCount = 1;
+      } else if (codeUnit <= 0x7FF) {
+        byteCount = 2;
+      } else if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+        byteCount = 4;
+        i++; // skip low surrogate
+      } else {
+        byteCount = 3;
+      }
+
+      byteIndex += byteCount;
+      map[i + 1] = byteIndex;
+    }
+
+    return map;
   }
 
   static String _alignmentToString(UdfAlignment alignment) {
