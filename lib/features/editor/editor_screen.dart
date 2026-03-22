@@ -1,20 +1,20 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_quill/flutter_quill.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
 import '../../core/paywall/paywall_service.dart';
 import '../../core/udf/udf_archive.dart';
-import '../../core/udf/udf_delta_converter.dart';
 import '../../core/udf/udf_document.dart';
 import '../../core/udf/udf_parser.dart';
 import '../../core/udf/udf_serializer.dart';
 
-/// Editor screen — WYSIWYG UDF editor using flutter_quill.
+/// Editor screen — plain text UDF editor.
 ///
-/// Loads a .udf file, converts to Quill Delta for editing, and saves back.
+/// Loads a .udf file, extracts text for editing, and saves back.
+/// Uses a standard TextField instead of flutter_quill to avoid
+/// upstream rendering bugs (RenderViewport, InheritedElement, ScrollPosition).
 class EditorScreen extends StatefulWidget {
   const EditorScreen({
     super.key,
@@ -33,7 +33,7 @@ class EditorScreen extends StatefulWidget {
 }
 
 class _EditorScreenState extends State<EditorScreen> {
-  late QuillController _quillController;
+  late TextEditingController _textController;
   UdfDocument? _originalDoc;
   UdfArchive? _originalArchive;
   bool _isLoading = true;
@@ -41,12 +41,18 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _hasChanges = false;
   String? _error;
   String? _savePath;
-  final FocusNode _editorFocusNode = FocusNode();
-  final ScrollController _scrollController = ScrollController();
+
+  // Toolbar state
+  bool _isBold = false;
+  bool _isItalic = false;
+  bool _isUnderline = false;
+  TextAlign _textAlign = TextAlign.left;
 
   @override
   void initState() {
     super.initState();
+    _textController = TextEditingController();
+    _textController.addListener(_onTextChanged);
     _initEditor();
   }
 
@@ -61,17 +67,10 @@ class _EditorScreenState extends State<EditorScreen> {
     }
 
     if (widget.isNewDocument) {
-      _initNewDocument();
+      setState(() => _isLoading = false);
     } else {
       await _loadExistingDocument();
     }
-  }
-
-  void _initNewDocument() {
-    _quillController = QuillController.basic();
-    _quillController.addListener(_onDocumentChanged);
-    _savePath = null;
-    setState(() => _isLoading = false);
   }
 
   Future<void> _loadExistingDocument() async {
@@ -80,24 +79,12 @@ class _EditorScreenState extends State<EditorScreen> {
       final archive = UdfArchive.fromBytes(bytes);
       final udfDoc = UdfParser.parse(archive.contentXml);
 
-      Document quillDoc;
-      try {
-        quillDoc = UdfDeltaConverter.toQuillDocument(udfDoc);
-      } catch (e) {
-        // Delta conversion failed — fall back to plain text editing
-        debugPrint('Delta conversion failed, falling back to plain text: $e');
-        quillDoc = Document()..insert(0, udfDoc.text);
-      }
-
       _originalDoc = udfDoc;
       _originalArchive = archive;
       _savePath = widget.filePath;
 
-      _quillController = QuillController(
-        document: quillDoc,
-        selection: const TextSelection.collapsed(offset: 0),
-      );
-      _quillController.addListener(_onDocumentChanged);
+      // Extract the full text from the UDF document
+      _textController.text = udfDoc.text;
 
       setState(() => _isLoading = false);
     } on UdfArchiveException catch (e) {
@@ -118,7 +105,7 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  void _onDocumentChanged() {
+  void _onTextChanged() {
     if (!_hasChanges) {
       setState(() => _hasChanges = true);
     }
@@ -129,11 +116,10 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() => _isSaving = true);
 
     try {
-      // Convert Quill document back to UDF
-      final udfDoc = UdfDeltaConverter.fromQuillDocument(
-        _quillController.document,
-        template: _originalDoc,
-      );
+      final editedText = _textController.text;
+
+      // Rebuild UDF document with edited text
+      final udfDoc = _rebuildDocument(editedText);
 
       // Serialize to content.xml
       final contentXml = UdfSerializer.serialize(udfDoc);
@@ -146,14 +132,7 @@ class _EditorScreenState extends State<EditorScreen> {
       );
 
       // Determine save path
-      if (_savePath == null) {
-        // New document — pick save location
-        _savePath = await _pickSavePath();
-        if (_savePath == null) {
-          setState(() => _isSaving = false);
-          return;
-        }
-      }
+      _savePath ??= _generateSavePath();
 
       await File(_savePath!).writeAsBytes(zipBytes, flush: true);
 
@@ -178,15 +157,53 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  Future<String?> _pickSavePath() async {
-    // For new documents, generate a default filename with timestamp
+  /// Rebuild a UDF document from edited plain text.
+  ///
+  /// Creates a single body section with one paragraph per line,
+  /// preserving the original document's format settings.
+  UdfDocument _rebuildDocument(String text) {
+    final lines = text.split('\n');
+    final paragraphs = <UdfParagraph>[];
+    var offset = 0;
+
+    for (final line in lines) {
+      if (line.isEmpty) {
+        paragraphs.add(const UdfParagraph(runs: []));
+      } else {
+        paragraphs.add(UdfParagraph(
+          runs: [
+            UdfTextRun(
+              startOffset: offset,
+              length: line.length,
+              fontSize: 12,
+              fontFamily: 'Times New Roman',
+            ),
+          ],
+        ));
+      }
+      offset += line.length;
+    }
+
+    // The full text without newlines (UDF stores text as a flat string)
+    final flatText = text.replaceAll('\n', '');
+
+    return UdfDocument(
+      formatId: _originalDoc?.formatId ?? '1.7',
+      text: flatText,
+      pageFormat: _originalDoc?.pageFormat ?? const UdfPageFormat(),
+      sections: [
+        UdfSection(type: UdfSectionType.body, paragraphs: paragraphs),
+      ],
+      styles: _originalDoc?.styles ?? {},
+      properties: _originalDoc?.properties ?? {},
+    );
+  }
+
+  String _generateSavePath() {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final defaultName = 'belge_$timestamp.udf';
-
-    // Use the app documents directory
     final dir = File(widget.filePath ?? '').parent;
-    final path = '${dir.path}/$defaultName';
-    return path;
+    return '${dir.path}/$defaultName';
   }
 
   String get _title {
@@ -199,9 +216,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   @override
   void dispose() {
-    _quillController.dispose();
-    _editorFocusNode.dispose();
-    _scrollController.dispose();
+    _textController.dispose();
     super.dispose();
   }
 
@@ -293,62 +308,157 @@ class _EditorScreenState extends State<EditorScreen> {
 
     return Column(
       children: [
-        // Toolbar
-        Container(
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            border: Border(
-              bottom: BorderSide(color: colorScheme.outlineVariant, width: 0.5),
-            ),
-          ),
-          child: QuillSimpleToolbar(
-            controller: _quillController,
-            config: QuillSimpleToolbarConfig(
-              showAlignmentButtons: true,
-              showBoldButton: true,
-              showItalicButton: true,
-              showUnderLineButton: true,
-              showStrikeThrough: true,
-              showFontSize: true,
-              showFontFamily: false, // UDF uses Times New Roman
-              showUndo: true,
-              showRedo: true,
-              showListBullets: false,
-              showListNumbers: false,
-              showListCheck: false,
-              showQuote: false,
-              showLink: false,
-              showCodeBlock: false,
-              showInlineCode: false,
-              showHeaderStyle: false,
-              showIndent: true,
-              showClearFormat: true,
-              showSearchButton: true,
-              multiRowsDisplay: true,
-              toolbarSize: AppTheme.udfFontSizeToLogical(12) * 3,
-            ),
-          ),
-        ),
+        // Formatting toolbar
+        _buildToolbar(colorScheme),
 
         // Editor
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: QuillEditor(
-              controller: _quillController,
-              focusNode: _editorFocusNode,
-              scrollController: _scrollController,
-              config: QuillEditorConfig(
-                placeholder: 'Belge içeriğini buraya yazın...',
-                padding: const EdgeInsets.all(16),
-                scrollable: true,
-                autoFocus: true,
-                expands: true,
+            child: TextField(
+              controller: _textController,
+              maxLines: null,
+              expands: true,
+              textAlignVertical: TextAlignVertical.top,
+              textAlign: _textAlign,
+              style: TextStyle(
+                fontFamily: 'Times New Roman',
+                fontSize: AppTheme.udfFontSizeToLogical(12),
+                fontWeight: _isBold ? FontWeight.bold : FontWeight.normal,
+                fontStyle: _isItalic ? FontStyle.italic : FontStyle.normal,
+                decoration: _isUnderline ? TextDecoration.underline : null,
+                height: 1.5,
+              ),
+              decoration: InputDecoration(
+                hintText: 'Belge içeriğini buraya yazın...',
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.all(16),
+                hintStyle: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                ),
               ),
             ),
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildToolbar(ColorScheme colorScheme) {
+    return Container(
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        border: Border(
+          bottom: BorderSide(color: colorScheme.outlineVariant, width: 0.5),
+        ),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Row(
+        children: [
+          // Bold
+          _toolbarButton(
+            icon: Icons.format_bold,
+            isActive: _isBold,
+            onPressed: () => setState(() => _isBold = !_isBold),
+            tooltip: 'Kalın',
+          ),
+          // Italic
+          _toolbarButton(
+            icon: Icons.format_italic,
+            isActive: _isItalic,
+            onPressed: () => setState(() => _isItalic = !_isItalic),
+            tooltip: 'İtalik',
+          ),
+          // Underline
+          _toolbarButton(
+            icon: Icons.format_underline,
+            isActive: _isUnderline,
+            onPressed: () => setState(() => _isUnderline = !_isUnderline),
+            tooltip: 'Altı Çizili',
+          ),
+
+          const SizedBox(width: 8),
+          Container(width: 1, height: 24, color: colorScheme.outlineVariant),
+          const SizedBox(width: 8),
+
+          // Alignment
+          _toolbarButton(
+            icon: Icons.format_align_left,
+            isActive: _textAlign == TextAlign.left,
+            onPressed: () => setState(() => _textAlign = TextAlign.left),
+            tooltip: 'Sola Hizala',
+          ),
+          _toolbarButton(
+            icon: Icons.format_align_center,
+            isActive: _textAlign == TextAlign.center,
+            onPressed: () => setState(() => _textAlign = TextAlign.center),
+            tooltip: 'Ortala',
+          ),
+          _toolbarButton(
+            icon: Icons.format_align_right,
+            isActive: _textAlign == TextAlign.right,
+            onPressed: () => setState(() => _textAlign = TextAlign.right),
+            tooltip: 'Sağa Hizala',
+          ),
+          _toolbarButton(
+            icon: Icons.format_align_justify,
+            isActive: _textAlign == TextAlign.justify,
+            onPressed: () => setState(() => _textAlign = TextAlign.justify),
+            tooltip: 'İki Yana Yasla',
+          ),
+
+          const Spacer(),
+
+          // Undo / Redo
+          IconButton(
+            icon: const Icon(Icons.undo, size: 20),
+            onPressed: _textController.value.composing.isValid ? null : null,
+            tooltip: 'Geri Al',
+            iconSize: 20,
+            visualDensity: VisualDensity.compact,
+          ),
+          IconButton(
+            icon: const Icon(Icons.redo, size: 20),
+            onPressed: null,
+            tooltip: 'Yinele',
+            iconSize: 20,
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _toolbarButton({
+    required IconData icon,
+    required bool isActive,
+    required VoidCallback onPressed,
+    required String tooltip,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: isActive
+                ? colorScheme.primaryContainer
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Icon(
+            icon,
+            size: 20,
+            color: isActive
+                ? colorScheme.onPrimaryContainer
+                : colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
     );
   }
 
