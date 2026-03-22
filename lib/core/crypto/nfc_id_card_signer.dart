@@ -86,6 +86,89 @@ class NfcIdCardSigner implements SigningService {
     return completer.future;
   }
 
+  /// Probe the PIN status on the card without attempting verification.
+  ///
+  /// Sends an empty VERIFY command after selecting the applet.
+  /// The card responds with a status word indicating:
+  /// - `63CX` → PIN active, X attempts remaining
+  /// - `6983` → PIN blocked
+  /// - `6985` → PIN not activated / not initialized
+  /// - `6A88` → PIN reference not found
+  Future<PinStatus> checkPinStatus() async {
+    final completer = Completer<PinStatus>();
+
+    await _nfcBridge.startSession(
+      alertMessage: 'PIN durumunu kontrol etmek için kartınızı yaklaştırın',
+      onTagDiscovered: (session) async {
+        try {
+          // SELECT e-sign applet
+          final selectResp = await session.selectAid(_tcKimlikAid);
+          if (!selectResp.isSuccess) {
+            await _nfcBridge.stopSession(errorMessage: 'Kart tanınmadı');
+            completer.complete(const PinStatus.notFound());
+            return;
+          }
+
+          // Empty VERIFY to probe PIN state (no PIN data sent)
+          final probeResp = await session.transceive([
+            0x00, // CLA
+            0x20, // INS: VERIFY
+            0x00, // P1
+            0x00, // P2: PIN reference
+          ]);
+
+          final status = _parsePinStatus(probeResp);
+          final message = switch (status.state) {
+            PinState.active => 'PIN aktif',
+            PinState.blocked => 'PIN bloke',
+            PinState.notActivated => 'PIN aktif değil',
+            PinState.notFound => 'PIN bulunamadı',
+            PinState.unknown => 'Durum bilinmiyor',
+          };
+          await _nfcBridge.stopSession(successMessage: message);
+          completer.complete(status);
+        } catch (e) {
+          await _nfcBridge.stopSession(errorMessage: 'Kontrol hatası');
+          if (!completer.isCompleted) {
+            completer.complete(const PinStatus.unknown());
+          }
+        }
+      },
+      onError: (error) {
+        if (!completer.isCompleted) {
+          completer.complete(const PinStatus.unknown());
+        }
+      },
+    );
+
+    return completer.future;
+  }
+
+  PinStatus _parsePinStatus(ApduResponse resp) {
+    // 0x9000 → PIN already verified (session still active)
+    if (resp.isSuccess) {
+      return const PinStatus.active();
+    }
+    // 0x63CX → PIN active, X attempts remaining
+    if (resp.sw1 == 0x63 && (resp.sw2 & 0xF0) == 0xC0) {
+      final remaining = resp.sw2 & 0x0F;
+      return PinStatus.active(remainingAttempts: remaining);
+    }
+    // 0x6983 → PIN blocked
+    if (resp.statusWord == 0x6983) {
+      return const PinStatus.blocked();
+    }
+    // 0x6985 → Conditions not satisfied (PIN not activated)
+    if (resp.statusWord == 0x6985) {
+      return const PinStatus.notActivated();
+    }
+    // 0x6A88 → Referenced data not found (no PIN on applet)
+    if (resp.statusWord == 0x6A88) {
+      return const PinStatus.notFound();
+    }
+    return const PinStatus.unknown();
+  }
+
   @override
   Future<Uint8List?> readCertificate() async {
     final completer = Completer<Uint8List?>();

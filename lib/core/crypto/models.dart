@@ -124,6 +124,53 @@ enum SigningMethod {
   usbOtg,
 }
 
+/// PIN activation status on a smart card.
+class PinStatus {
+  const PinStatus._({
+    required this.state,
+    this.remainingAttempts,
+  });
+
+  final PinState state;
+
+  /// Remaining PIN attempts before lockout (only available for [PinState.active]).
+  final int? remainingAttempts;
+
+  /// PIN is active and ready for verification.
+  const PinStatus.active({int? remainingAttempts})
+      : this._(state: PinState.active, remainingAttempts: remainingAttempts);
+
+  /// PIN is blocked due to too many wrong attempts.
+  const PinStatus.blocked() : this._(state: PinState.blocked);
+
+  /// PIN has not been activated on this card.
+  const PinStatus.notActivated() : this._(state: PinState.notActivated);
+
+  /// PIN reference not found (e-sign applet may not exist).
+  const PinStatus.notFound() : this._(state: PinState.notFound);
+
+  /// Could not determine PIN status.
+  const PinStatus.unknown() : this._(state: PinState.unknown);
+}
+
+/// PIN state on a smart card.
+enum PinState {
+  /// PIN is active and can be verified.
+  active,
+
+  /// PIN is blocked (too many wrong attempts).
+  blocked,
+
+  /// PIN has not been activated / initialized.
+  notActivated,
+
+  /// PIN reference not found on card.
+  notFound,
+
+  /// Unknown state.
+  unknown,
+}
+
 /// Turkish GSM operator for Mobil İmza.
 enum MobilOperator {
   turkcell('Turkcell', ['530', '531', '532', '533', '534', '535', '536', '537', '538', '539']),

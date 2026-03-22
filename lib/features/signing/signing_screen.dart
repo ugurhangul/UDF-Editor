@@ -95,6 +95,7 @@ class _SigningScreenState extends State<SigningScreen> {
           duration: const Duration(milliseconds: 300),
           child: switch (_state) {
             _SigningState.selectMethod => _buildMethodSelector(colorScheme),
+            _SigningState.checkingPin => _buildCheckingPin(colorScheme),
             _SigningState.enterPin => _buildPinEntry(colorScheme),
             _SigningState.signing => _buildSigningProgress(colorScheme),
             _SigningState.success => _buildSuccess(colorScheme),
@@ -194,13 +195,7 @@ class _SigningScreenState extends State<SigningScreen> {
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: isAvailable
-            ? () {
-                setState(() {
-                  _selectedMethod = method;
-                  _errorMessage = null;
-                  _state = _SigningState.enterPin;
-                });
-              }
+            ? () => _onMethodSelected(method)
             : null,
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -508,6 +503,112 @@ class _SigningScreenState extends State<SigningScreen> {
       ),
     );
   }
+  // ── Method selection with PIN check ────────────────────────────────
+
+  void _onMethodSelected(SigningMethod method) {
+    setState(() {
+      _selectedMethod = method;
+      _errorMessage = null;
+    });
+
+    // NFC methods: check PIN status before showing PIN entry
+    if (method == SigningMethod.nfcIdCard) {
+      setState(() => _state = _SigningState.checkingPin);
+      _checkPinForNfc();
+    } else {
+      setState(() => _state = _SigningState.enterPin);
+    }
+  }
+
+  Future<void> _checkPinForNfc() async {
+    try {
+      final signer = _signers[SigningMethod.nfcIdCard]! as NfcIdCardSigner;
+      final status = await signer.checkPinStatus();
+
+      if (!mounted) return;
+
+      switch (status.state) {
+        case PinState.active:
+          final remaining = status.remainingAttempts;
+          setState(() {
+            _state = _SigningState.enterPin;
+            if (remaining != null && remaining < 3) {
+              _errorMessage = 'Dikkat: $remaining PIN denemesi kaldı';
+            }
+          });
+        case PinState.blocked:
+          setState(() {
+            _state = _SigningState.error;
+            _errorMessage = 'PIN bloke edilmiş.\n'
+                'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi sıfırlatın.';
+          });
+        case PinState.notActivated:
+          setState(() {
+            _state = _SigningState.error;
+            _errorMessage = 'E-imza PIN\'iniz aktif değil.\n'
+                'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi aktifleştirin.';
+          });
+        case PinState.notFound:
+          setState(() {
+            _state = _SigningState.error;
+            _errorMessage = 'Bu kartta e-imza uygulaması bulunamadı.\n'
+                'Lütfen TC Kimlik kartınızı kullandığınızdan emin olun.';
+          });
+        case PinState.unknown:
+          // Proceed anyway — card might still work
+          setState(() => _state = _SigningState.enterPin);
+      }
+    } catch (e) {
+      if (mounted) {
+        // On error, proceed to PIN entry — don't block the user
+        setState(() => _state = _SigningState.enterPin);
+      }
+    }
+  }
+
+  Widget _buildCheckingPin(ColorScheme colorScheme) {
+    return Center(
+      key: const ValueKey('checkingPin'),
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 80,
+              height: 80,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                color: colorScheme.primary,
+              ),
+            ),
+            const SizedBox(height: 32),
+            Text(
+              'PIN Durumu Kontrol Ediliyor...',
+              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Kartınızı telefona yaklaştırın',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+            TextButton(
+              onPressed: () => setState(() {
+                _state = _SigningState.selectMethod;
+              }),
+              child: const Text('İptal'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   // ── Signing logic ─────────────────────────────────────────────────
 
@@ -603,6 +704,7 @@ class _SigningScreenState extends State<SigningScreen> {
 
 enum _SigningState {
   selectMethod,
+  checkingPin,
   enterPin,
   signing,
   success,
