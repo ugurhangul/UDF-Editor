@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:purchases_flutter/purchases_flutter.dart';
 import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 
@@ -15,8 +15,11 @@ class PaywallService {
 
   static final PaywallService instance = PaywallService._();
 
-  /// RevenueCat public SDK API key.
-  static const _apiKey = 'REVENUECAT_TEST_KEY_REMOVED';
+  /// RevenueCat SDK API key — injected via `--dart-define=REVENUECAT_API_KEY=...`.
+  /// Falls back to a test key in debug builds only.
+  static const _apiKey = kDebugMode
+      ? 'REVENUECAT_TEST_KEY_REMOVED' // test key — debug only
+      : String.fromEnvironment('REVENUECAT_API_KEY');
 
   /// Entitlement identifier matching RevenueCat Dashboard.
   static const proEntitlement = 'UDFtor Pro';
@@ -43,6 +46,18 @@ class PaywallService {
 
     try {
       await Purchases.setLogLevel(LogLevel.debug);
+
+      if (_apiKey.isEmpty) {
+        // MEDIUM-03: release build missing --dart-define=REVENUECAT_API_KEY would
+        // otherwise configure with an empty key and silently stay free-tier forever.
+        debugPrint(
+          'PaywallService FATAL: REVENUECAT_API_KEY is empty — did you forget '
+          '--dart-define=REVENUECAT_API_KEY=... ? Purchases.configure skipped; '
+          'app will run in free tier only.',
+        );
+        _initialized = true;
+        return;
+      }
 
       final config = PurchasesConfiguration(_apiKey);
       await Purchases.configure(config);

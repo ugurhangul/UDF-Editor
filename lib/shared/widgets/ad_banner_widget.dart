@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
@@ -21,7 +22,11 @@ class _AdBannerWidgetState extends State<AdBannerWidget> {
   BannerAd? _bannerAd;
   bool _isLoaded = false;
 
-  static const _adUnitId = 'ca-app-pub-9106641442812067/4454343459';
+  /// AdMob banner unit ID — injected via `--dart-define=ADMOB_BANNER_ID=...`.
+  /// Falls back to Google's test banner ID in debug builds.
+  static const _adUnitId = kDebugMode
+      ? 'ca-app-pub-3940256099942544/6300978111' // Google test banner
+      : String.fromEnvironment('ADMOB_BANNER_ID');
 
   @override
   void initState() {
@@ -37,7 +42,14 @@ class _AdBannerWidgetState extends State<AdBannerWidget> {
   Future<void> _loadAd() async {
     try {
       final screenWidth = MediaQuery.of(context).size.width.truncate();
-      final adSize = AdSize(width: screenWidth, height: 60);
+      // M-03: use an adaptive anchored size instead of a fixed 60px height.
+      final adSize = await AdSize.getAnchoredAdaptiveBannerAdSize(
+            Orientation.portrait,
+            screenWidth,
+          ) ??
+          AdSize.banner;
+
+      if (!mounted) return;
 
       final bannerAd = BannerAd(
         adUnitId: _adUnitId,
@@ -45,12 +57,16 @@ class _AdBannerWidgetState extends State<AdBannerWidget> {
         request: const AdRequest(),
         listener: BannerAdListener(
           onAdLoaded: (ad) {
-            if (mounted) {
-              setState(() {
-                _bannerAd = ad as BannerAd;
-                _isLoaded = true;
-              });
+            if (!mounted) {
+              // Widget gone before load finished — dispose() only covers
+              // _bannerAd, so drop the orphan here or it leaks natively.
+              ad.dispose();
+              return;
             }
+            setState(() {
+              _bannerAd = ad as BannerAd;
+              _isLoaded = true;
+            });
           },
           onAdFailedToLoad: (ad, error) {
             debugPrint('AdBanner failed to load: ${error.message}');

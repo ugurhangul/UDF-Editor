@@ -29,7 +29,8 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
-      fontFamily: 'Roboto',
+      // L-02: no fontFamily override so iOS uses SF Pro and Android uses Roboto
+      // (does not affect document rendering, which uses its own font constants).
 
       // -- AppBar --
       appBarTheme: AppBarTheme(
