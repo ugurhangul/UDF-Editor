@@ -116,7 +116,9 @@ class UdfParagraph {
   const UdfParagraph({
     required this.runs,
     this.alignment = UdfAlignment.left,
-    this.lineSpacing = 1.0,
+    // Java Swing additive line-spacing factor: 0 = single, 0.5 = 1.5-line,
+    // 1.0 = double. NOT a total line-height multiplier.
+    this.lineSpacing = 0.0,
     this.hangingIndent = 0,
     this.firstLineIndent = 0,
     this.leftIndent = 0,
