@@ -1,11 +1,15 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:purchases_ui_flutter/purchases_ui_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../app/theme.dart';
 import '../../core/paywall/paywall_service.dart';
+import '../../shared/draft_store.dart';
+import '../../shared/version_store.dart';
 import '../../core/udf/udf_archive.dart';
 import '../../core/udf/udf_document.dart';
 import '../../core/udf/udf_parser.dart';
@@ -33,28 +37,42 @@ class EditorScreen extends StatefulWidget {
   State<EditorScreen> createState() => _EditorScreenState();
 }
 
-class _EditorScreenState extends State<EditorScreen> {
+class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver {
   late TextEditingController _textController;
   UdfDocument? _originalDoc;
   UdfArchive? _originalArchive;
+
+  /// One template per original paragraph, with newline characters stripped
+  /// out of the runs ("visible runs"). Editor lines map 1:1 onto these —
+  /// using the raw runs instead would misalign indices (runs may contain
+  /// '\n') and shift formatting across paragraphs on every save.
+  List<UdfParagraph> _paraTemplates = [];
   bool _isLoading = true;
   bool _isSaving = false;
   bool _hasChanges = false;
   String? _error;
   String? _savePath;
 
-  // Toolbar state
-  bool _isBold = false;
-  bool _isItalic = false;
-  bool _isUnderline = false;
-  TextAlign _textAlign = TextAlign.left;
-
+  // Note: Rich text formatting (bold/italic/underline/alignment) is not
+  // supported in the plain text editor. The toolbar has been removed to
+  // avoid misleading users. A future rich text editor will restore this.
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _textController = TextEditingController();
     _textController.addListener(_onTextChanged);
     _initEditor();
+  }
+
+  // H-02: opportunistically persist a plain-text draft when the app is
+  // backgrounded so unsaved work survives an OS kill.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if ((state == AppLifecycleState.inactive || state == AppLifecycleState.paused) &&
+        _hasChanges) {
+      _saveDraft();
+    }
   }
 
   Future<void> _initEditor() async {
@@ -72,6 +90,10 @@ class _EditorScreenState extends State<EditorScreen> {
     } else {
       await _loadExistingDocument();
     }
+
+    if (_error == null) {
+      await _checkForDraft();
+    }
   }
 
   Future<void> _loadExistingDocument() async {
@@ -83,27 +105,33 @@ class _EditorScreenState extends State<EditorScreen> {
       _originalDoc = udfDoc;
       _originalArchive = archive;
       _savePath = widget.filePath;
+      _paraTemplates = _buildParaTemplates(udfDoc);
 
       // Extract text with newlines at paragraph boundaries.
       // UDF stores text as a flat CData string — paragraphs define ranges.
       // We need to insert \n between paragraphs so _rebuildDocument can
       // split them back correctly on save.
-      _textController.text = _extractTextWithNewlines(udfDoc);
+      _setTextSilently(_extractTextWithNewlines(udfDoc));
 
+      if (!mounted) return;
       setState(() => _isLoading = false);
     } on UdfArchiveException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _isLoading = false;
       });
     } on UdfParseException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _isLoading = false;
       });
     } catch (e) {
+      debugPrint('Dosya yükleme hatası: $e');
+      if (!mounted) return;
       setState(() {
-        _error = 'Dosya yüklenemedi: $e';
+        _error = 'Dosya yüklenemedi. Dosya bozuk veya erişilemiyor olabilir.';
         _isLoading = false;
       });
     }
@@ -113,6 +141,15 @@ class _EditorScreenState extends State<EditorScreen> {
     if (!_hasChanges) {
       setState(() => _hasChanges = true);
     }
+  }
+
+  /// Programmatic text assignment must not mark the document dirty —
+  /// otherwise every opened document immediately blocks back navigation
+  /// and writes phantom drafts.
+  void _setTextSilently(String text) {
+    _textController.removeListener(_onTextChanged);
+    _textController.text = text;
+    _textController.addListener(_onTextChanged);
   }
 
   /// Extract text from a UDF document, inserting \n at paragraph boundaries.
@@ -130,12 +167,14 @@ class _EditorScreenState extends State<EditorScreen> {
       if (para.runs.isEmpty) {
         // Empty paragraph → blank line
       } else {
-        // Concatenate all runs in this paragraph
+        // Concatenate all runs in this paragraph. Runs may contain literal
+        // '\n' characters — strip them, the paragraph boundary itself is the
+        // newline. Leaving them in desynchronizes line↔paragraph indices.
         for (final run in para.runs) {
           final start = run.startOffset;
           final end = (start + run.length).clamp(0, doc.text.length);
           if (start >= 0 && start < doc.text.length) {
-            buffer.write(doc.text.substring(start, end));
+            buffer.write(doc.text.substring(start, end).replaceAll('\n', ''));
           }
         }
       }
@@ -152,8 +191,55 @@ class _EditorScreenState extends State<EditorScreen> {
     return buffer.toString();
   }
 
-  Future<void> _save() async {
-    if (_isSaving) return;
+  /// Build per-paragraph templates whose runs carry visible (newline-free)
+  /// lengths, so an unchanged editor line reflows onto identical run
+  /// boundaries instead of drifting by the stripped '\n' count.
+  List<UdfParagraph> _buildParaTemplates(UdfDocument doc) {
+    final templates = <UdfParagraph>[];
+    for (final para in doc.allParagraphs) {
+      final visibleRuns = <UdfTextRun>[];
+      for (final run in para.runs) {
+        final start = run.startOffset.clamp(0, doc.text.length);
+        final end = (run.startOffset + run.length).clamp(start, doc.text.length);
+        final visibleLength =
+            doc.text.substring(start, end).replaceAll('\n', '').length;
+        if (visibleLength <= 0) continue;
+        visibleRuns.add(UdfTextRun(
+          startOffset: 0, // recomputed on save
+          length: visibleLength,
+          bold: run.bold,
+          italic: run.italic,
+          underline: run.underline,
+          strikethrough: run.strikethrough,
+          superscript: run.superscript,
+          subscript: run.subscript,
+          fontSize: run.fontSize,
+          fontFamily: run.fontFamily,
+          foregroundColor: run.foregroundColor,
+          backgroundColor: run.backgroundColor,
+          styleName: run.styleName,
+        ));
+      }
+      templates.add(UdfParagraph(
+        runs: visibleRuns,
+        alignment: para.alignment,
+        lineSpacing: para.lineSpacing,
+        hangingIndent: para.hangingIndent,
+        firstLineIndent: para.firstLineIndent,
+        leftIndent: para.leftIndent,
+        rightIndent: para.rightIndent,
+        spaceBefore: para.spaceBefore,
+        spaceAfter: para.spaceAfter,
+        styleName: para.styleName,
+      ));
+    }
+    return templates;
+  }
+
+  /// Returns true only when the document was actually written to disk, so
+  /// exit paths can refuse to close on failure.
+  Future<bool> _save() async {
+    if (_isSaving) return false;
     setState(() => _isSaving = true);
 
     try {
@@ -173,28 +259,34 @@ class _EditorScreenState extends State<EditorScreen> {
       );
 
       // Determine save path
-      _savePath ??= _generateSavePath();
+      _savePath ??= await _generateSavePath();
 
+      // Version history: preserve the pre-save content before overwriting.
+      await VersionStore.snapshot(_savePath!);
       await File(_savePath!).writeAsBytes(zipBytes, flush: true);
 
       _originalDoc = udfDoc;
+      _paraTemplates = _buildParaTemplates(udfDoc);
+      await _deleteDraft();
+      if (!mounted) return true;
       setState(() {
         _hasChanges = false;
         _isSaving = false;
       });
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Belge kaydedildi.')),
-        );
-      }
+      HapticFeedback.mediumImpact();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Belge kaydedildi.')),
+      );
+      return true;
     } catch (e) {
+      debugPrint('Kaydetme hatası: $e');
+      if (!mounted) return false;
       setState(() => _isSaving = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Kaydetme hatası: $e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Belge kaydedilemedi. Lütfen tekrar deneyin.')),
+      );
+      return false;
     }
   }
 
@@ -210,7 +302,7 @@ class _EditorScreenState extends State<EditorScreen> {
   /// 5. Recalculate all startOffset/length values for the flat CData.
   UdfDocument _rebuildDocument(String text) {
     final lines = text.split('\n');
-    final originalParagraphs = _originalDoc?.allParagraphs ?? [];
+    final originalParagraphs = _paraTemplates;
     final paragraphs = <UdfParagraph>[];
     var offset = 0;
 
@@ -224,7 +316,7 @@ class _EditorScreenState extends State<EditorScreen> {
         paragraphs.add(UdfParagraph(
           runs: const [],
           alignment: origPara?.alignment ?? UdfAlignment.left,
-          lineSpacing: origPara?.lineSpacing ?? 1.0,
+          lineSpacing: origPara?.lineSpacing ?? 0.0,
           spaceBefore: origPara?.spaceBefore ?? 0,
           spaceAfter: origPara?.spaceAfter ?? 0,
           leftIndent: origPara?.leftIndent ?? 0,
@@ -257,7 +349,7 @@ class _EditorScreenState extends State<EditorScreen> {
       paragraphs.add(UdfParagraph(
         runs: runs,
         alignment: origPara?.alignment ?? UdfAlignment.left,
-        lineSpacing: origPara?.lineSpacing ?? 1.0,
+        lineSpacing: origPara?.lineSpacing ?? 0.0,
         spaceBefore: origPara?.spaceBefore ?? 0,
         spaceAfter: origPara?.spaceAfter ?? 0,
         leftIndent: origPara?.leftIndent ?? 0,
@@ -403,11 +495,73 @@ class _EditorScreenState extends State<EditorScreen> {
     return runs;
   }
 
-  String _generateSavePath() {
+  Future<String> _generateSavePath() async {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
     final defaultName = 'belge_$timestamp.udf';
-    final dir = File(widget.filePath ?? '').parent;
-    return '${dir.path}/$defaultName';
+    // CODE-02: Always save to the app's udf_files directory.
+    final appDir = await getApplicationDocumentsDirectory();
+    final udfDir = Directory('${appDir.path}/udf_files');
+    if (!await udfDir.exists()) {
+      await udfDir.create(recursive: true);
+    }
+    return '${udfDir.path}/$defaultName';
+  }
+
+  // H-02: draft auto-save, keyed by SHA-256 of the source path (DraftStore)
+  // so distinct documents can never collide onto the same draft.
+  Future<void> _saveDraft() async {
+    try {
+      final file = await DraftStore.fileFor(widget.filePath);
+      await file.writeAsString(_textController.text, flush: true);
+    } catch (_) {
+      // Best-effort — a failed draft write should never crash the app.
+    }
+  }
+
+  Future<void> _deleteDraft() => DraftStore.deleteFor(widget.filePath);
+
+  Future<void> _checkForDraft() async {
+    try {
+      final file = await DraftStore.fileFor(widget.filePath);
+      if (!await file.exists()) return;
+
+      final draftText = await file.readAsString();
+      if (!mounted || draftText.isEmpty) return;
+
+      final restore = await showDialog<bool>(
+        context: context,
+        // Dismissal must not destroy the draft — deletion only on explicit 'Sil'.
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Kaydedilmemiş taslak bulundu'),
+          content: const Text(
+            'Bu belge için kaydedilmemiş bir taslak bulundu. Ne yapmak istersiniz?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Sil'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Geri Yükle'),
+            ),
+          ],
+        ),
+      );
+
+      if (restore == true) {
+        _setTextSilently(draftText);
+        // Restored draft content genuinely is unsaved work.
+        if (!_hasChanges && mounted) setState(() => _hasChanges = true);
+      } else if (restore == false) {
+        // Only the explicit 'Sil' button deletes; a dismissed dialog
+        // (system back) keeps the draft for the next open.
+        await _deleteDraft();
+      }
+    } catch (_) {
+      // Best-effort.
+    }
   }
 
   String get _title {
@@ -420,6 +574,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _textController.dispose();
     super.dispose();
   }
@@ -429,50 +584,61 @@ class _EditorScreenState extends State<EditorScreen> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_title, style: const TextStyle(fontSize: 16)),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => _confirmExit(context),
-        ),
-        actions: [
-          if (!_isLoading && _error == null) ...[
-            // Save
-            IconButton(
-              icon: _isSaving
-                  ? SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: colorScheme.onSurface,
-                      ),
-                    )
-                  : Icon(
-                      Icons.save_outlined,
-                      color: _hasChanges
-                          ? colorScheme.primary
-                          : colorScheme.onSurface.withValues(alpha: 0.4),
-                    ),
-              onPressed: _hasChanges && !_isSaving ? _save : null,
-              tooltip: 'Kaydet',
-            ),
-            // Share
-            if (_savePath != null)
+    return PopScope(
+      // C-01: block the hardware back / swipe-back gesture when there are
+      // unsaved changes so it can't bypass the confirm-exit dialog.
+      canPop: !_hasChanges,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _confirmExit(context);
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: true,
+        appBar: AppBar(
+          title: Text(_title, style: const TextStyle(fontSize: 16)),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => _confirmExit(context),
+          ),
+          actions: [
+            if (!_isLoading && _error == null) ...[
+              // Save
               IconButton(
-                icon: const Icon(Icons.share_outlined),
-                onPressed: () async {
-                  await SharePlus.instance.share(
-                    ShareParams(files: [XFile(_savePath!)], title: _title),
-                  );
-                },
-                tooltip: 'Paylaş',
+                icon: _isSaving
+                    ? SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: colorScheme.onSurface,
+                        ),
+                      )
+                    : Icon(
+                        Icons.save_outlined,
+                        color: _hasChanges
+                            ? colorScheme.primary
+                            : colorScheme.onSurface.withValues(alpha: 0.4),
+                      ),
+                onPressed: _hasChanges && !_isSaving ? _save : null,
+                tooltip: 'Kaydet',
               ),
+              // Share
+              if (_savePath != null)
+                IconButton(
+                  icon: const Icon(Icons.share_outlined),
+                  onPressed: () async {
+                    await SharePlus.instance.share(
+                      ShareParams(files: [XFile(_savePath!)], title: _title),
+                    );
+                  },
+                  tooltip: 'Paylaş',
+                ),
+            ],
           ],
-        ],
+        ),
+        body: SafeArea(
+          child: _buildBody(theme, colorScheme),
+        ),
       ),
-      body: _buildBody(theme, colorScheme),
     );
   }
 
@@ -517,45 +683,48 @@ class _EditorScreenState extends State<EditorScreen> {
       );
     }
 
-    return Column(
-      children: [
-        // Formatting toolbar
-        _buildToolbar(colorScheme),
+    return GestureDetector(
+      // H-01: tapping outside the TextField dismisses the keyboard.
+      behavior: HitTestBehavior.translucent,
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Column(
+        children: [
+          // Plain text editor notice
+          _buildEditorInfoBar(colorScheme),
 
-        // Editor
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: TextField(
-              controller: _textController,
-              maxLines: null,
-              expands: true,
-              textAlignVertical: TextAlignVertical.top,
-              textAlign: _textAlign,
-              style: TextStyle(
-                fontFamily: 'Times New Roman',
-                fontSize: AppTheme.udfFontSizeToLogical(12),
-                fontWeight: _isBold ? FontWeight.bold : FontWeight.normal,
-                fontStyle: _isItalic ? FontStyle.italic : FontStyle.normal,
-                decoration: _isUnderline ? TextDecoration.underline : null,
-                height: 1.5,
-              ),
-              decoration: InputDecoration(
-                hintText: 'Belge içeriğini buraya yazın...',
-                border: InputBorder.none,
-                contentPadding: const EdgeInsets.all(16),
-                hintStyle: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+          // Editor
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: TextField(
+                controller: _textController,
+                maxLines: null,
+                expands: true,
+                textAlignVertical: TextAlignVertical.top,
+                style: TextStyle(
+                  fontFamily: 'Times New Roman',
+                  fontSize: AppTheme.udfFontSizeToLogical(12),
+                  height: 1.5,
+                ),
+                decoration: InputDecoration(
+                  hintText: 'Belge içeriğini buraya yazın...',
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.all(16),
+                  hintStyle: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildToolbar(ColorScheme colorScheme) {
+  /// UX-01: Honest info bar replacing the fake formatting toolbar.
+  /// Tells the user this is plain text mode.
+  Widget _buildEditorInfoBar(ColorScheme colorScheme) {
     return Container(
       decoration: BoxDecoration(
         color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
@@ -563,112 +732,42 @@ class _EditorScreenState extends State<EditorScreen> {
           bottom: BorderSide(color: colorScheme.outlineVariant, width: 0.5),
         ),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       child: Row(
         children: [
-          // Bold
-          _toolbarButton(
-            icon: Icons.format_bold,
-            isActive: _isBold,
-            onPressed: () => setState(() => _isBold = !_isBold),
-            tooltip: 'Kalın',
+          Icon(
+            Icons.text_fields,
+            size: 16,
+            color: colorScheme.onSurfaceVariant,
           ),
-          // Italic
-          _toolbarButton(
-            icon: Icons.format_italic,
-            isActive: _isItalic,
-            onPressed: () => setState(() => _isItalic = !_isItalic),
-            tooltip: 'İtalik',
-          ),
-          // Underline
-          _toolbarButton(
-            icon: Icons.format_underline,
-            isActive: _isUnderline,
-            onPressed: () => setState(() => _isUnderline = !_isUnderline),
-            tooltip: 'Altı Çizili',
-          ),
-
           const SizedBox(width: 8),
-          Container(width: 1, height: 24, color: colorScheme.outlineVariant),
-          const SizedBox(width: 8),
-
-          // Alignment
-          _toolbarButton(
-            icon: Icons.format_align_left,
-            isActive: _textAlign == TextAlign.left,
-            onPressed: () => setState(() => _textAlign = TextAlign.left),
-            tooltip: 'Sola Hizala',
+          Text(
+            'Düz Metin Düzenleyici',
+            style: TextStyle(
+              fontSize: 13,
+              color: colorScheme.onSurfaceVariant,
+            ),
           ),
-          _toolbarButton(
-            icon: Icons.format_align_center,
-            isActive: _textAlign == TextAlign.center,
-            onPressed: () => setState(() => _textAlign = TextAlign.center),
-            tooltip: 'Ortala',
-          ),
-          _toolbarButton(
-            icon: Icons.format_align_right,
-            isActive: _textAlign == TextAlign.right,
-            onPressed: () => setState(() => _textAlign = TextAlign.right),
-            tooltip: 'Sağa Hizala',
-          ),
-          _toolbarButton(
-            icon: Icons.format_align_justify,
-            isActive: _textAlign == TextAlign.justify,
-            onPressed: () => setState(() => _textAlign = TextAlign.justify),
-            tooltip: 'İki Yana Yasla',
-          ),
-
           const Spacer(),
-
-          // Undo / Redo
-          IconButton(
-            icon: const Icon(Icons.undo, size: 20),
-            onPressed: _textController.value.composing.isValid ? null : null,
-            tooltip: 'Geri Al',
-            iconSize: 20,
-            visualDensity: VisualDensity.compact,
-          ),
-          IconButton(
-            icon: const Icon(Icons.redo, size: 20),
-            onPressed: null,
-            tooltip: 'Yinele',
-            iconSize: 20,
-            visualDensity: VisualDensity.compact,
+          // L-04: live character/word count.
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _textController,
+            builder: (context, value, _) {
+              final charCount = value.text.length;
+              final wordCount = value.text
+                  .split(RegExp(r'\s+'))
+                  .where((w) => w.isNotEmpty)
+                  .length;
+              return Text(
+                '$wordCount kelime, $charCount karakter',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                ),
+              );
+            },
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _toolbarButton({
-    required IconData icon,
-    required bool isActive,
-    required VoidCallback onPressed,
-    required String tooltip,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        onTap: onPressed,
-        borderRadius: BorderRadius.circular(6),
-        child: Container(
-          width: 36,
-          height: 36,
-          decoration: BoxDecoration(
-            color: isActive
-                ? colorScheme.primaryContainer
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Icon(
-            icon,
-            size: 20,
-            color: isActive
-                ? colorScheme.onPrimaryContainer
-                : colorScheme.onSurfaceVariant,
-          ),
-        ),
       ),
     );
   }
@@ -691,8 +790,10 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
           TextButton(
             onPressed: () async {
-              await _save();
-              if (ctx.mounted) Navigator.of(ctx).pop(true);
+              // Exit only when the write actually succeeded — a swallowed
+              // save error must not silently discard the edits.
+              final saved = await _save();
+              if (saved && ctx.mounted) Navigator.of(ctx).pop(true);
             },
             child: const Text('Kaydet ve Çık'),
           ),
@@ -708,6 +809,9 @@ class _EditorScreenState extends State<EditorScreen> {
     );
 
     if (result == true && context.mounted) {
+      // Discarding changes also discards their draft ('Kaydet ve Çık'
+      // already deleted it inside _save). Fire-and-forget.
+      _deleteDraft();
       Navigator.of(context).pop();
     }
   }
