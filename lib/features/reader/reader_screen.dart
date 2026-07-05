@@ -299,13 +299,25 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 ),
                 _sigDetailRow(ctx, 'CAdES Profili', info.cadesProfile),
                 _sigDetailRow(ctx, 'Zaman Damgası', info.hasTimestamp ? 'Var' : 'Yok'),
-                const SizedBox(height: 12),
-                Text(
-                  'Not: Sertifika zinciri kök sertifika otoritesine kadar doğrulanmamıştır.',
-                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                ),
+                _sigDetailRow(ctx, 'Güven Zinciri', switch (info.trustLevel) {
+                  TrustLevel.trustedChain =>
+                    'Güvenilir kök: ${info.anchorName ?? '-'}',
+                  TrustLevel.untrustedAnchor =>
+                    'Kök sertifikaya kadar doğrulanamadı',
+                  TrustLevel.notEvaluated => null,
+                }),
+                if (info.trustLevel != TrustLevel.trustedChain) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    'Not: İmza kriptografik olarak doğrulandı ancak sertifika '
+                    'zinciri bilinen bir Türkiye nitelikli kök sertifikasına '
+                    'kadar oluşturulamadı (ara sertifikalar dosyada gömülü '
+                    'olmayabilir).',
+                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                ],
               ],
             ),
           ),

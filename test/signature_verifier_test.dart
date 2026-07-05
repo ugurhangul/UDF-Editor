@@ -8,6 +8,7 @@ import 'package:asn1lib/asn1lib.dart';
 import 'package:udf_editor/core/crypto/cades_builder.dart';
 import 'package:udf_editor/core/crypto/models.dart';
 import 'package:udf_editor/core/crypto/signature_verifier.dart';
+import 'package:udf_editor/core/crypto/trust_store.dart';
 
 // ── Test PKI helpers (mirrors crypto_test.dart) ─────────────────────────
 
@@ -223,6 +224,107 @@ Uint8List _buildNoSignedAttrsEnvelope({
   return contentInfo.encodedBytes;
 }
 
+// ── ECDSA (P-256) test PKI ──────────────────────────────────────────────
+
+AsymmetricKeyPair<PublicKey, PrivateKey> _generateEcKeyPair() {
+  final gen = ECKeyGenerator()
+    ..init(ParametersWithRandom(
+      ECKeyGeneratorParameters(ECCurve_secp256r1()),
+      _secureRandom(),
+    ));
+  return gen.generateKeyPair();
+}
+
+Uint8List _ecSpki(ECPublicKey pub) {
+  final algId = ASN1Sequence()
+    ..add(ASN1ObjectIdentifier.fromComponentString('1.2.840.10045.2.1'))
+    ..add(ASN1ObjectIdentifier.fromComponentString('1.2.840.10045.3.1.7'));
+  final point = pub.Q!.getEncoded(false); // uncompressed 0x04||X||Y
+  final spki = ASN1Sequence()
+    ..add(algId)
+    ..add(ASN1BitString(point));
+  return spki.encodedBytes;
+}
+
+Uint8List _ecdsaSignDer(Uint8List data, ECPrivateKey priv) {
+  final signer = ECDSASigner(SHA256Digest())
+    ..init(true, ParametersWithRandom(
+      PrivateKeyParameter<ECPrivateKey>(priv),
+      _secureRandom(),
+    ));
+  final sig = signer.generateSignature(data) as ECSignature;
+  final seq = ASN1Sequence()
+    ..add(ASN1Integer(sig.r))
+    ..add(ASN1Integer(sig.s));
+  return seq.encodedBytes;
+}
+
+Uint8List _buildEcSelfSignedCert(ECPublicKey pub, ECPrivateKey priv) {
+  final cn = ASN1Sequence()
+    ..add(ASN1ObjectIdentifier.fromComponentString('2.5.4.3'))
+    ..add(ASN1UTF8String('EC Test Signer'));
+  final name = ASN1Sequence()..add(ASN1Set()..add(cn));
+  final now = DateTime.now().toUtc();
+  final ecdsaSha256 = ASN1Sequence()
+    ..add(ASN1ObjectIdentifier.fromComponentString('1.2.840.10045.4.3.2'));
+  final tbs = ASN1Sequence()
+    ..add(_wrapExplicit(0, ASN1Integer.fromInt(2)))
+    ..add(ASN1Integer.fromInt(7))
+    ..add(ecdsaSha256)
+    ..add(name)
+    ..add(ASN1Sequence()
+      ..add(ASN1UtcTime(now))
+      ..add(ASN1UtcTime(now.add(const Duration(days: 365)))))
+    ..add(name)
+    ..add(ASN1Parser(_ecSpki(pub)).nextObject());
+  final sig = _ecdsaSignDer(tbs.encodedBytes, priv);
+  final cert = ASN1Sequence()
+    ..add(tbs)
+    ..add(ecdsaSha256)
+    ..add(ASN1BitString(sig));
+  return cert.encodedBytes;
+}
+
+Uint8List _buildEcNoAttrsEnvelope({
+  required Uint8List contentXml,
+  required Uint8List certDer,
+  required ECPrivateKey priv,
+}) {
+  final signature = _ecdsaSignDer(contentXml, priv);
+  final certSeq = ASN1Parser(certDer).nextObject() as ASN1Sequence;
+  final tbsElements = (certSeq.elements.first as ASN1Sequence).elements.toList();
+  final off = tbsElements.first.tag == 0xA0 ? 1 : 0;
+  final issuerAndSerial = ASN1Sequence()
+    ..add(tbsElements[off + 2])
+    ..add(tbsElements[off]);
+  ASN1Sequence alg(String oid) => ASN1Sequence()
+    ..add(ASN1ObjectIdentifier.fromComponentString(oid));
+  final signerInfo = ASN1Sequence()
+    ..add(ASN1Integer.fromInt(1))
+    ..add(issuerAndSerial)
+    ..add(ASN1Sequence()
+      ..add(ASN1ObjectIdentifier.fromComponentString('2.16.840.1.101.3.4.2.1'))
+      ..add(ASN1Null()))
+    ..add(alg('1.2.840.10045.4.3.2')) // ecdsa-with-SHA256
+    ..add(ASN1OctetString(signature));
+  final certificates = ASN1Set()..add(ASN1Parser(certDer).nextObject());
+  final signedData = ASN1Sequence()
+    ..add(ASN1Integer.fromInt(1))
+    ..add(ASN1Set()
+      ..add(ASN1Sequence()
+        ..add(ASN1ObjectIdentifier.fromComponentString(
+            '2.16.840.1.101.3.4.2.1'))
+        ..add(ASN1Null())))
+    ..add(ASN1Sequence()
+      ..add(ASN1ObjectIdentifier.fromComponentString('1.2.840.113549.1.7.1')))
+    ..add(_wrapImplicit(0, certificates))
+    ..add(ASN1Set()..add(signerInfo));
+  final contentInfo = ASN1Sequence()
+    ..add(ASN1ObjectIdentifier.fromComponentString('1.2.840.113549.1.7.2'))
+    ..add(_wrapExplicit(0, signedData));
+  return contentInfo.encodedBytes;
+}
+
 void main() {
   late RSAPrivateKey privateKey;
   late Uint8List certDer;
@@ -415,6 +517,80 @@ void main() {
       );
 
       expect(info.status, SignatureStatus.invalid);
+    });
+  });
+
+  group('SignatureVerifier ECDSA', () {
+    test('ECDSA-signed envelope verifies as valid', () {
+      final keys = _generateEcKeyPair();
+      final pub = keys.publicKey as ECPublicKey;
+      final priv = keys.privateKey as ECPrivateKey;
+      final ecCert = _buildEcSelfSignedCert(pub, priv);
+      final content = Uint8List.fromList('<content>ECDSA belge</content>'.codeUnits);
+
+      final envelope = _buildEcNoAttrsEnvelope(
+        contentXml: content,
+        certDer: ecCert,
+        priv: priv,
+      );
+
+      final info = SignatureVerifier.verify(
+        signSgnBytes: envelope,
+        contentXmlBytes: content,
+      );
+
+      expect(info.status, SignatureStatus.valid);
+      expect(info.signatureAlgorithm, 'SHA256withECDSA');
+    });
+
+    test('ECDSA envelope invalid for tampered content', () {
+      final keys = _generateEcKeyPair();
+      final pub = keys.publicKey as ECPublicKey;
+      final priv = keys.privateKey as ECPrivateKey;
+      final ecCert = _buildEcSelfSignedCert(pub, priv);
+      final content = Uint8List.fromList('<content>Original</content>'.codeUnits);
+      final envelope = _buildEcNoAttrsEnvelope(
+        contentXml: content,
+        certDer: ecCert,
+        priv: priv,
+      );
+
+      final info = SignatureVerifier.verify(
+        signSgnBytes: envelope,
+        contentXmlBytes: Uint8List.fromList('<content>Tampered</content>'.codeUnits),
+      );
+
+      expect(info.status, SignatureStatus.invalid);
+    });
+  });
+
+  group('TrustStore', () {
+    test('bundled anchors parse and match their declared fingerprints', () {
+      expect(TrustStore.anchors, isNotEmpty);
+      for (final a in TrustStore.anchors) {
+        final fp = SHA256Digest().process(a.der);
+        final hex = fp
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join()
+            .toUpperCase();
+        expect(hex, a.sha256Fingerprint, reason: a.name);
+      }
+    });
+
+    test('self-signed non-anchor signer is valid but untrusted', () async {
+      final content = Uint8List.fromList('<content>x</content>'.codeUnits);
+      final built = await _buildRfcEnvelope(
+        contentXml: content,
+        certDer: certDer,
+        privateKey: privateKey,
+      );
+      final info = SignatureVerifier.verify(
+        signSgnBytes: built.envelope,
+        contentXmlBytes: content,
+      );
+      expect(info.status, SignatureStatus.valid);
+      expect(info.trustLevel, TrustLevel.untrustedAnchor);
+      expect(info.anchorName, isNull);
     });
   });
 }

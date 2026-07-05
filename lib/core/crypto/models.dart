@@ -18,6 +18,22 @@ enum SignatureStatus {
   unknown,
 }
 
+/// How far the signer certificate could be validated against the bundled
+/// Turkish qualified-ESHS trust anchors. Independent of [SignatureStatus]:
+/// a cryptographically valid signature can still lack a trusted anchor when
+/// the CMS omits the intermediate certificates.
+enum TrustLevel {
+  /// Signer chained (cryptographically) to a bundled Turkish qualified root.
+  trustedChain,
+
+  /// Signature verified, but the chain could not be built to a bundled root
+  /// (missing intermediates or an unrecognised CA).
+  untrustedAnchor,
+
+  /// Trust was not evaluated (e.g. the signature itself did not verify).
+  notEvaluated,
+}
+
 /// Information extracted from a sign.sgn CMS SignedData envelope.
 class SignatureInfo {
   const SignatureInfo({
@@ -32,6 +48,8 @@ class SignatureInfo {
     this.signatureAlgorithm,
     this.hasTimestamp = false,
     this.hasEmbeddedValidation = false,
+    this.trustLevel = TrustLevel.notEvaluated,
+    this.anchorName,
   });
 
   /// Overall verification result.
@@ -67,6 +85,12 @@ class SignatureInfo {
   /// Whether CRL/OCSP validation data is embedded (CAdES-X-LONG).
   final bool hasEmbeddedValidation;
 
+  /// Result of chaining the signer certificate to a bundled trust anchor.
+  final TrustLevel trustLevel;
+
+  /// Name of the trusted root/CA the chain terminated at, when trusted.
+  final String? anchorName;
+
   /// Human-readable CAdES profile based on embedded data.
   String get cadesProfile {
     if (hasEmbeddedValidation) return 'CAdES-X-LONG';
@@ -86,7 +110,9 @@ class SignatureInfo {
         digestAlgorithm = null,
         signatureAlgorithm = null,
         hasTimestamp = false,
-        hasEmbeddedValidation = false;
+        hasEmbeddedValidation = false,
+        trustLevel = TrustLevel.notEvaluated,
+        anchorName = null;
 }
 
 /// Raw signing result from a signing device (NFC card, Mobil İmza, etc.).

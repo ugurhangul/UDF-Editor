@@ -13,6 +13,7 @@ import '../../core/crypto/nfc_smart_card_signer.dart';
 import '../../core/crypto/mobil_imza_signer.dart';
 import '../../core/crypto/usb_otg_signer.dart';
 import '../../core/crypto/cades_builder.dart';
+import '../../core/crypto/signature_verifier.dart';
 import '../../core/udf/udf_archive.dart';
 import '../../shared/version_store.dart';
 
@@ -809,13 +810,21 @@ class _SigningScreenState extends State<SigningScreen> {
 
       final result = await signer.sign(contentXmlBytes, pin: credential);
 
-      // Build CAdES envelope
+      // Build (or pass through) the CAdES envelope.
       setState(() => _statusMessage = 'CAdES imza zarfı oluşturuluyor...');
-      final builder = CadesBuilder();
-      final signatureBytes = await builder.buildSignedData(
-        contentXmlBytes: contentXmlBytes,
-        signingResult: result,
-      );
+      final Uint8List signatureBytes;
+      if (method == SigningMethod.mobilImza &&
+          SignatureVerifier.isCmsSignedData(result.signature)) {
+        // The operator returned a complete CMS envelope — use it as-is
+        // rather than re-wrapping raw bytes (which would corrupt it).
+        signatureBytes = result.signature;
+      } else {
+        final builder = CadesBuilder();
+        signatureBytes = await builder.buildSignedData(
+          contentXmlBytes: contentXmlBytes,
+          signingResult: result,
+        );
+      }
 
       // Write sign.sgn into the UDF archive and save
       setState(() => _statusMessage = 'İmza dosyaya yazılıyor...');
