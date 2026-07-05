@@ -95,6 +95,7 @@ class SigningResult {
     required this.signature,
     this.certificate,
     this.certificateChain = const [],
+    this.signedAttributes,
   });
 
   /// Raw signature bytes (PKCS#1 v1.5 or similar).
@@ -107,6 +108,12 @@ class SigningResult {
   /// Full certificate chain (DER-encoded), from signer to root CA.
   /// May be empty if the signing device only provides the signer cert.
   final List<Uint8List> certificateChain;
+
+  /// DER-encoded SignedAttributes (SET OF Attribute, tag 0x31) that
+  /// [signature] was computed over, per RFC 5652 §5.4.
+  /// Null when the device signed the content bytes directly (Mobil İmza) —
+  /// the CMS envelope must then omit signedAttrs entirely.
+  final Uint8List? signedAttributes;
 }
 
 /// Signing method identifier for UI and routing.

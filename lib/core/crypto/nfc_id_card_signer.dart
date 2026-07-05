@@ -258,11 +258,17 @@ class NfcIdCardSigner implements SigningService {
       );
     }
 
-    // 5. Hash content.xml
-    final contentHash = CadesBuilder.hashContentXml(contentXmlBytes);
+    // 5. Build CMS SignedAttributes and hash them.
+    // CRITICAL-02 companion: RFC 5652 §5.4 requires the signature over
+    // DER(SET OF signedAttrs), not over the raw content.
+    final signedAttrs = CadesBuilder.prepareSignedAttributes(
+      contentXmlBytes: contentXmlBytes,
+      signerCertDer: certData,
+    );
+    final attrsHash = CadesBuilder.hashContentXml(signedAttrs);
 
     // 6. PSO: COMPUTE DIGITAL SIGNATURE
-    final digestInfo = _buildDigestInfo(contentHash);
+    final digestInfo = _buildDigestInfo(attrsHash);
     final sigResp = await session.computeDigitalSignature(digestInfo);
 
     Uint8List signatureBytes;
@@ -280,6 +286,7 @@ class NfcIdCardSigner implements SigningService {
     return SigningResult(
       signature: signatureBytes,
       certificate: certData,
+      signedAttributes: signedAttrs,
     );
   }
 
