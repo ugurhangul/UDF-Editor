@@ -14,6 +14,7 @@ import '../../core/crypto/mobil_imza_signer.dart';
 import '../../core/crypto/usb_otg_signer.dart';
 import '../../core/crypto/cades_builder.dart';
 import '../../core/crypto/signature_verifier.dart';
+import '../../core/paywall/paywall_service.dart';
 import '../../core/udf/udf_archive.dart';
 import '../../shared/version_store.dart';
 
@@ -87,6 +88,17 @@ class _SigningScreenState extends State<SigningScreen> {
   }
 
   Future<void> _checkAvailability() async {
+    // Paywall check — signing is a Pro feature (defense in depth;
+    // primary gate lives on the reader's sign button).
+    if (PaywallService.instance.isFree) {
+      setState(() {
+        _state = _SigningState.error;
+        _errorMessage = 'Bu özellik Pro abonelik gerektirir.';
+        _checkingAvailability = false;
+      });
+      return;
+    }
+
     for (final entry in _signers.entries) {
       try {
         _availability[entry.key] = await entry.value.isAvailable();
