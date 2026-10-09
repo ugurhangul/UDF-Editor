@@ -48,3 +48,6 @@ app.*.map.json
 *.jks
 *.keystore
 android/key.properties
+
+# Real documents with personal data — local test fixtures only
+*.udf

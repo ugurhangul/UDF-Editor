@@ -16,10 +16,7 @@ class PaywallService {
   static final PaywallService instance = PaywallService._();
 
   /// RevenueCat SDK API key — injected via `--dart-define=REVENUECAT_API_KEY=...`.
-  /// Falls back to a test key in debug builds only.
-  static const _apiKey = kDebugMode
-      ? 'REVENUECAT_TEST_KEY_REMOVED' // test key — debug only
-      : String.fromEnvironment('REVENUECAT_API_KEY');
+  static const _apiKey = String.fromEnvironment('REVENUECAT_API_KEY');
 
   /// Entitlement identifier matching RevenueCat Dashboard.
   static const proEntitlement = 'UDFtor Pro';

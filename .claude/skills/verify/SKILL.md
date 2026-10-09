@@ -21,7 +21,7 @@ flutter run -d emulator-5554 --debug   # background; ready on "Flutter run key c
 - Screenshots: `"$ADB" exec-out screencap -p > shot.png` (1344x2992).
 - Taps/text: `input tap X Y`, `input text 'a%sb'` (%s = space), `keyevent KEYCODE_BACK/HOME/MOVE_END/DEL`.
 - Git Bash mangles `/sdcard` — use `MSYS_NO_PATHCONV=1`.
-- Test fixture: push `knowledge/sample.udf` (real signed UDF, Turkish text, LineSpacing=0.5) to `/sdcard/Download/`, import via "Dosya Aç" FAB.
+- Test fixture: push `knowledge/sample.udf` (gitignored, local only — contains personal data; real signed UDF, Turkish text, LineSpacing=0.5) to `/sdcard/Download/`, import via "Dosya Aç" FAB.
 - App storage (debug): `adb shell run-as com.ugurhangul.udftor ls app_flutter/udf_files` (+ `udf_drafts`). Binary copy in: `adb push` to `/data/local/tmp` then `run-as ... cat`.
 
 ## Gotchas
