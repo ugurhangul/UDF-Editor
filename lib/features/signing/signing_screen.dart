@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/crypto/models.dart';
 import '../../core/crypto/signing_service.dart';
@@ -13,7 +13,10 @@ import '../../core/crypto/nfc_smart_card_signer.dart';
 import '../../core/crypto/mobil_imza_signer.dart';
 import '../../core/crypto/usb_otg_signer.dart';
 import '../../core/crypto/cades_builder.dart';
+import '../../core/crypto/signature_verifier.dart';
+import '../../core/paywall/paywall_service.dart';
 import '../../core/udf/udf_archive.dart';
+import '../../shared/version_store.dart';
 
 /// Signing method selection and execution screen.
 ///
@@ -29,6 +32,12 @@ class SigningScreen extends StatefulWidget {
   State<SigningScreen> createState() => _SigningScreenState();
 }
 
+// MEDIUM-01: lockout state lives at process scope, not widget scope —
+// otherwise popping and re-pushing the screen resets the throttle and the
+// backoff provides no real brute-force delay.
+int _pinFailureCount = 0;
+DateTime? _pinLockoutUntil;
+
 class _SigningScreenState extends State<SigningScreen> {
   final _pinController = TextEditingController();
   final _phoneController = TextEditingController();
@@ -38,6 +47,10 @@ class _SigningScreenState extends State<SigningScreen> {
   String? _errorMessage;
   String? _statusMessage;
   bool _pinObscured = true;
+
+  // MEDIUM-01: exponential backoff throttling after failed PIN attempts.
+  Timer? _retryTimer;
+  int _retryCountdownSeconds = 0;
 
   // Availability cache
   final Map<SigningMethod, bool> _availability = {};
@@ -55,17 +68,37 @@ class _SigningScreenState extends State<SigningScreen> {
       SigningMethod.mobilImza: MobilImzaSigner(),
       SigningMethod.usbOtg: UsbOtgSigner(),
     };
+    // A re-pushed screen inherits any active lockout.
+    final lockout = _pinLockoutUntil;
+    if (lockout != null && lockout.isAfter(DateTime.now())) {
+      _startRetryCountdown(lockout.difference(DateTime.now()).inSeconds + 1);
+    }
     _checkAvailability();
   }
 
   @override
   void dispose() {
+    // SEC-02: Clear sensitive credentials from memory before disposal.
+    _pinController.clear();
+    _phoneController.clear();
     _pinController.dispose();
     _phoneController.dispose();
+    _retryTimer?.cancel();
     super.dispose();
   }
 
   Future<void> _checkAvailability() async {
+    // Paywall check — signing is a Pro feature (defense in depth;
+    // primary gate lives on the reader's sign button).
+    if (PaywallService.instance.isFree) {
+      setState(() {
+        _state = _SigningState.error;
+        _errorMessage = 'Bu özellik Pro abonelik gerektirir.';
+        _checkingAvailability = false;
+      });
+      return;
+    }
+
     for (final entry in _signers.entries) {
       try {
         _availability[entry.key] = await entry.value.isAvailable();
@@ -185,68 +218,88 @@ class _SigningScreenState extends State<SigningScreen> {
   }) {
     final isAvailable = _availability[method] ?? false;
     final isSelected = _selectedMethod == method;
+    final statusText = isAvailable ? subtitle : _unavailableReason(method);
 
-    return Card(
-      elevation: isSelected ? 4 : 1,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: isSelected
-            ? BorderSide(color: colorScheme.primary, width: 2)
-            : BorderSide.none,
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: isAvailable
-            ? () => _onMethodSelected(method)
-            : null,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: isAvailable
-                      ? colorScheme.primaryContainer
-                      : colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(12),
+    return Semantics(
+      button: true,
+      enabled: isAvailable,
+      label: '$title. $statusText',
+      excludeSemantics: true,
+      child: Card(
+        elevation: isSelected ? 4 : 1,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: isSelected
+              ? BorderSide(color: colorScheme.primary, width: 2)
+              : BorderSide.none,
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: isAvailable
+              ? () => _onMethodSelected(method)
+              : null,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: isAvailable
+                        ? colorScheme.primaryContainer
+                        : colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    icon,
+                    color: isAvailable
+                        ? colorScheme.onPrimaryContainer
+                        : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                  ),
                 ),
-                child: Icon(
-                  icon,
-                  color: isAvailable
-                      ? colorScheme.onPrimaryContainer
-                      : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: isAvailable ? null : colorScheme.onSurfaceVariant,
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: isAvailable ? null : colorScheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      isAvailable ? subtitle : 'Bu cihazda kullanılamıyor',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
+                      const SizedBox(height: 4),
+                      Text(
+                        statusText,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              if (isAvailable)
-                Icon(Icons.chevron_right, color: colorScheme.onSurfaceVariant),
-            ],
+                if (isAvailable)
+                  Icon(Icons.chevron_right, color: colorScheme.onSurfaceVariant),
+              ],
+            ),
           ),
         ),
       ),
     );
+  }
+
+  // M-09: actionable per-method reason instead of a generic "unavailable".
+  String _unavailableReason(SigningMethod method) {
+    switch (method) {
+      case SigningMethod.nfcIdCard:
+      case SigningMethod.nfcSmartCard:
+        return "NFC kapalı veya desteklenmiyor. Ayarlardan NFC'yi açın.";
+      case SigningMethod.usbOtg:
+        return 'USB OTG okuyucu bağlı değil.';
+      case SigningMethod.mobilImza:
+        return 'Bu cihazda kullanılamıyor';
+    }
   }
 
   // ── PIN entry ─────────────────────────────────────────────────────
@@ -491,12 +544,18 @@ class _SigningScreenState extends State<SigningScreen> {
                 ),
                 const SizedBox(width: 12),
                 FilledButton.icon(
-                  onPressed: () => setState(() {
-                    _state = _SigningState.enterPin;
-                    _errorMessage = null;
-                  }),
+                  onPressed: _retryCountdownSeconds > 0
+                      ? null
+                      : () => setState(() {
+                          _state = _SigningState.enterPin;
+                          _errorMessage = null;
+                        }),
                   icon: const Icon(Icons.refresh),
-                  label: const Text('Tekrar Dene'),
+                  label: Text(
+                    _retryCountdownSeconds > 0
+                        ? 'Tekrar Dene ($_retryCountdownSeconds)'
+                        : 'Tekrar Dene',
+                  ),
                 ),
               ],
             ),
@@ -536,6 +595,8 @@ class _SigningScreenState extends State<SigningScreen> {
 
       switch (status.state) {
         case PinState.active:
+          // UX-07: PIN check advanced past card detection to a usable state.
+          HapticFeedback.mediumImpact();
           final remaining = status.remainingAttempts;
           setState(() {
             _state = _SigningState.enterPin;
@@ -544,57 +605,101 @@ class _SigningScreenState extends State<SigningScreen> {
             }
           });
         case PinState.blocked:
-          setState(() {
-            _state = _SigningState.error;
-            _errorMessage = 'PIN bloke edilmiş.\n'
-                'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi sıfırlatın.';
-          });
+          _enterErrorState(
+            'PIN bloke edilmiş.\n'
+            'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi sıfırlatın.',
+          );
         case PinState.notActivated:
-          setState(() {
-            _state = _SigningState.error;
-            _errorMessage = 'E-imza PIN\'iniz aktif değil.\n'
-                'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi aktifleştirin.';
-          });
+          _enterErrorState(
+            'E-imza PIN\'iniz aktif değil.\n'
+            'Nüfus Müdürlüğü\'ne başvurarak PIN\'inizi aktifleştirin.',
+          );
         case PinState.notFound:
-          setState(() {
-            _state = _SigningState.error;
-            _errorMessage = 'Bu kartta e-imza uygulaması bulunamadı.\n'
-                'Lütfen TC Kimlik kartınızı kullandığınızdan emin olun.';
-          });
+          _enterErrorState(
+            'Bu kartta e-imza uygulaması bulunamadı.\n'
+            'Lütfen TC Kimlik kartınızı kullandığınızdan emin olun.',
+          );
         case PinState.unknown:
-          setState(() {
-            _state = _SigningState.error;
-            _errorMessage = 'Kart okunamadı.\n'
-                'Kartınızı telefona yaklaştırıp tekrar deneyin.';
-          });
+          _enterErrorState(
+            'Kart okunamadı.\n'
+            'Kartınızı telefona yaklaştırıp tekrar deneyin.',
+          );
       }
     } on TimeoutException {
       if (mounted && _state == _SigningState.checkingPin) {
         _cancelPinCheck();
-        setState(() {
-          _state = _SigningState.error;
-          _errorMessage = 'Kart algılanamadı — süre doldu.\n'
-              'Kartınızı telefonun NFC antenine yaklaştırıp tekrar deneyin.';
-        });
+        _enterErrorState(
+          'Kart algılanamadı — süre doldu.\n'
+          'Kartınızı telefonun NFC antenine yaklaştırıp tekrar deneyin.',
+        );
       }
     } catch (e) {
       if (mounted && _state == _SigningState.checkingPin) {
-        setState(() {
-          _state = _SigningState.error;
-          _errorMessage = 'NFC iletişim hatası: $e\n'
-              'Kartınızı sabit tutup tekrar deneyin.';
-        });
+        // LOW-01: don't leak raw exception detail into the UI.
+        debugPrint('NFC iletişim hatası: $e');
+        _enterErrorState('Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.');
       }
     }
   }
 
+  // UX-07/M-07: centralizes the error-state transition so every error path
+  // gets consistent haptic feedback.
+  void _enterErrorState(String message, {bool countAsPinFailure = false}) {
+    HapticFeedback.lightImpact();
+    if (countAsPinFailure) {
+      _registerPinFailure();
+    }
+    setState(() {
+      _state = _SigningState.error;
+      _errorMessage = message;
+    });
+  }
+
+  // MEDIUM-01: exponential backoff (5s -> 15s -> 60s cap) after consecutive
+  // failed PIN/signing attempts, to slow down brute-force PIN guessing.
+  void _registerPinFailure() {
+    _pinFailureCount++;
+    const delaysSeconds = [5, 15, 60];
+    final index = (_pinFailureCount - 1).clamp(0, delaysSeconds.length - 1).toInt();
+    final delay = delaysSeconds[index];
+    _pinLockoutUntil = DateTime.now().add(Duration(seconds: delay));
+    _startRetryCountdown(delay);
+  }
+
+  void _resetPinFailures() {
+    _pinFailureCount = 0;
+    _pinLockoutUntil = null;
+    _retryTimer?.cancel();
+    _retryCountdownSeconds = 0;
+  }
+
+  void _startRetryCountdown(int seconds) {
+    _retryTimer?.cancel();
+    _retryCountdownSeconds = seconds;
+    _retryTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _retryCountdownSeconds--;
+        if (_retryCountdownSeconds <= 0) {
+          _retryCountdownSeconds = 0;
+          timer.cancel();
+        }
+      });
+    });
+  }
+
   void _cancelPinCheck() {
-    // Stop the NFC session so it doesn't keep polling
-    final signer = _signers[SigningMethod.nfcIdCard];
-    if (signer is NfcIdCardSigner) {
-      // Access the bridge to stop session — use a fresh NfcBridge
-      // since the signer's bridge is private
+    // CODE-06: Stop the NFC session via the bridge — but avoid creating
+    // orphan instances. Use a single shared bridge or stop the signer directly.
+    try {
+      // stopSession is async — catchError handles the Future's failure,
+      // the outer try the synchronous one.
       NfcBridge().stopSession().catchError((_) {});
+    } catch (_) {
+      // Best-effort — NFC may already be stopped.
     }
     setState(() {
       _state = _SigningState.selectMethod;
@@ -665,6 +770,18 @@ class _SigningScreenState extends State<SigningScreen> {
     final method = _selectedMethod;
     if (method == null) return;
 
+    // MEDIUM-01: gate the signing entry point itself, not just the retry
+    // button — otherwise the lockout is decorative.
+    final lockout = _pinLockoutUntil;
+    if (lockout != null && lockout.isAfter(DateTime.now())) {
+      final remaining = lockout.difference(DateTime.now()).inSeconds + 1;
+      setState(() {
+        _errorMessage =
+            'Çok fazla başarısız deneme. $remaining saniye sonra tekrar deneyin.';
+      });
+      return;
+    }
+
     final isMobilImza = method == SigningMethod.mobilImza;
     final credential = isMobilImza ? _phoneController.text : _pinController.text;
 
@@ -705,13 +822,21 @@ class _SigningScreenState extends State<SigningScreen> {
 
       final result = await signer.sign(contentXmlBytes, pin: credential);
 
-      // Build CAdES envelope
+      // Build (or pass through) the CAdES envelope.
       setState(() => _statusMessage = 'CAdES imza zarfı oluşturuluyor...');
-      final builder = CadesBuilder();
-      final signatureBytes = await builder.buildSignedData(
-        contentXmlBytes: contentXmlBytes,
-        signingResult: result,
-      );
+      final Uint8List signatureBytes;
+      if (method == SigningMethod.mobilImza &&
+          SignatureVerifier.isCmsSignedData(result.signature)) {
+        // The operator returned a complete CMS envelope — use it as-is
+        // rather than re-wrapping raw bytes (which would corrupt it).
+        signatureBytes = result.signature;
+      } else {
+        final builder = CadesBuilder();
+        signatureBytes = await builder.buildSignedData(
+          contentXmlBytes: contentXmlBytes,
+          signingResult: result,
+        );
+      }
 
       // Write sign.sgn into the UDF archive and save
       setState(() => _statusMessage = 'İmza dosyaya yazılıyor...');
@@ -721,31 +846,36 @@ class _SigningScreenState extends State<SigningScreen> {
         propertiesXml: archive.propertiesXml,
         otherFiles: archive.otherFiles,
       );
+      // Version history: preserve the unsigned document before overwriting.
+      await VersionStore.snapshot(widget.filePath);
       await file.writeAsBytes(signedArchiveBytes, flush: true);
 
+      // SEC-02: Clear credentials from memory after successful signing.
+      _pinController.clear();
+      _phoneController.clear();
+
       if (mounted) {
+        // UX-07/M-07: success haptic; MEDIUM-01 reset backoff on success.
+        HapticFeedback.heavyImpact();
+        _resetPinFailures();
         setState(() => _state = _SigningState.success);
       }
     } on UdfArchiveException catch (e) {
       if (mounted) {
-        setState(() {
-          _state = _SigningState.error;
-          _errorMessage = 'Belge okunamadı: ${e.message}';
-        });
+        _enterErrorState('Belge okunamadı: ${e.message}', countAsPinFailure: true);
       }
     } on SigningException catch (e) {
       if (mounted) {
-        setState(() {
-          _state = _SigningState.error;
-          _errorMessage = e.message;
-        });
+        _enterErrorState(e.message, countAsPinFailure: true);
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _state = _SigningState.error;
-          _errorMessage = 'Beklenmeyen hata: $e';
-        });
+        // LOW-01: don't leak raw exception detail into the UI.
+        debugPrint('Beklenmeyen imzalama hatası: $e');
+        _enterErrorState(
+          'Beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.',
+          countAsPinFailure: true,
+        );
       }
     }
   }

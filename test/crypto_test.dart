@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -104,12 +105,31 @@ ASN1Object _wrapExplicit(int tagNumber, ASN1Object content) {
 
 SecureRandom _secureRandom() {
   final random = FortunaRandom();
+  final seedSource = Random.secure();
   random.seed(KeyParameter(
-    Uint8List.fromList(
-      List.generate(32, (i) => DateTime.now().microsecondsSinceEpoch ~/ (i + 1) & 0xFF),
-    ),
+    Uint8List.fromList(List.generate(32, (_) => seedSource.nextInt(256))),
   ));
   return random;
+}
+
+/// Two-phase RFC 5652 signing: sign the DER-encoded SignedAttributes,
+/// exactly like the card/USB signers do in production.
+SigningResult _signRfc5652({
+  required Uint8List contentXml,
+  required ({Uint8List certDer, RSAPrivateKey privateKey, RSAPublicKey publicKey}) testCert,
+}) {
+  final signedAttrs = CadesBuilder.prepareSignedAttributes(
+    contentXmlBytes: contentXml,
+    signerCertDer: testCert.certDer,
+  );
+  final signer = RSASigner(SHA256Digest(), '0609608648016503040201');
+  signer.init(true, PrivateKeyParameter<RSAPrivateKey>(testCert.privateKey));
+  final sig = signer.generateSignature(signedAttrs);
+  return SigningResult(
+    signature: sig.bytes,
+    certificate: testCert.certDer,
+    signedAttributes: signedAttrs,
+  );
 }
 
 void main() {
@@ -139,16 +159,7 @@ void main() {
       final testCert = _generateTestCert();
       final contentXml = Uint8List.fromList('<content>Test</content>'.codeUnits);
 
-      // Sign the content hash
-      final contentHash = CadesBuilder.hashContentXml(contentXml);
-      final signer = RSASigner(SHA256Digest(), '0609608648016503040201');
-      signer.init(true, PrivateKeyParameter<RSAPrivateKey>(testCert.privateKey));
-      final sig = signer.generateSignature(contentHash);
-
-      final signingResult = SigningResult(
-        signature: sig.bytes,
-        certificate: testCert.certDer,
-      );
+      final signingResult = _signRfc5652(contentXml: contentXml, testCert: testCert);
 
       final builder = CadesBuilder();
       final signedDataDer = await builder.buildSignedData(
@@ -178,15 +189,7 @@ void main() {
       final testCert = _generateTestCert();
       final contentXml = Uint8List.fromList('<content>Legal Document</content>'.codeUnits);
 
-      final contentHash = CadesBuilder.hashContentXml(contentXml);
-      final signer = RSASigner(SHA256Digest(), '0609608648016503040201');
-      signer.init(true, PrivateKeyParameter<RSAPrivateKey>(testCert.privateKey));
-      final sig = signer.generateSignature(contentHash);
-
-      final signingResult = SigningResult(
-        signature: sig.bytes,
-        certificate: testCert.certDer,
-      );
+      final signingResult = _signRfc5652(contentXml: contentXml, testCert: testCert);
 
       final builder = CadesBuilder();
       final signedDataDer = await builder.buildSignedData(
@@ -210,15 +213,7 @@ void main() {
       final testCert = _generateTestCert();
       final contentXml = Uint8List.fromList('<content>Original</content>'.codeUnits);
 
-      final contentHash = CadesBuilder.hashContentXml(contentXml);
-      final signer = RSASigner(SHA256Digest(), '0609608648016503040201');
-      signer.init(true, PrivateKeyParameter<RSAPrivateKey>(testCert.privateKey));
-      final sig = signer.generateSignature(contentHash);
-
-      final signingResult = SigningResult(
-        signature: sig.bytes,
-        certificate: testCert.certDer,
-      );
+      final signingResult = _signRfc5652(contentXml: contentXml, testCert: testCert);
 
       final builder = CadesBuilder();
       final signedDataDer = await builder.buildSignedData(
@@ -252,15 +247,7 @@ void main() {
       final testCert = _generateTestCert();
       final contentXml = Uint8List.fromList('<content>Test</content>'.codeUnits);
 
-      final contentHash = CadesBuilder.hashContentXml(contentXml);
-      final signer = RSASigner(SHA256Digest(), '0609608648016503040201');
-      signer.init(true, PrivateKeyParameter<RSAPrivateKey>(testCert.privateKey));
-      final sig = signer.generateSignature(contentHash);
-
-      final signingResult = SigningResult(
-        signature: sig.bytes,
-        certificate: testCert.certDer,
-      );
+      final signingResult = _signRfc5652(contentXml: contentXml, testCert: testCert);
 
       final builder = CadesBuilder();
       final signedDataDer = await builder.buildSignedData(

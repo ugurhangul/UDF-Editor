@@ -1,4 +1,4 @@
-package com.udftor.udf_editor
+package com.ugurhangul.udftor
 
 import android.app.PendingIntent
 import android.content.Context
@@ -39,7 +39,7 @@ class UsbOtgChannelHandler(private val context: Context) : MethodChannel.MethodC
         // Timeout for USB transfers (ms)
         private const val USB_TIMEOUT = 5000
 
-        private const val ACTION_USB_PERMISSION = "com.udftor.udf_editor.USB_PERMISSION"
+        private const val ACTION_USB_PERMISSION = "com.ugurhangul.udftor.USB_PERMISSION"
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {

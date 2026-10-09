@@ -1,4 +1,4 @@
-package com.udftor.udf_editor
+package com.ugurhangul.udftor
 
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine

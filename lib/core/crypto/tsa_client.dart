@@ -1,8 +1,8 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:asn1lib/asn1lib.dart';
 import 'package:http/http.dart' as http;
-import 'package:pointycastle/export.dart';
 
 /// RFC 3161 Timestamp Authority client.
 ///
@@ -77,16 +77,9 @@ class TsaClient {
       ..add(ASN1OctetString(messageHash));
 
     // Nonce (random 8 bytes for replay protection)
-    final nonceBytes = Uint8List(8);
-    final secureRandom = FortunaRandom();
-    secureRandom.seed(KeyParameter(
-      Uint8List.fromList(
-        List.generate(32, (i) => DateTime.now().microsecondsSinceEpoch ~/ (i + 1) & 0xFF),
-      ),
-    ));
-    for (var i = 0; i < 8; i++) {
-      nonceBytes[i] = secureRandom.nextUint8();
-    }
+    // CRITICAL-01: CSPRNG nonce — predictable seeds enable TSA replay.
+    final rng = Random.secure();
+    final nonceBytes = Uint8List.fromList(List.generate(8, (_) => rng.nextInt(256)));
 
     // TimeStampReq
     final tsReq = ASN1Sequence()

@@ -97,9 +97,15 @@ class UsbOtgSigner implements SigningService {
       _checkSuccess(mseResp, SigningErrorCode.certificateError,
           'Güvenlik ortamı ayarlanamadı');
 
-      // 6. Hash + PSO COMPUTE DIGITAL SIGNATURE
-      final contentHash = CadesBuilder.hashContentXml(contentXmlBytes);
-      final digestInfo = _buildDigestInfo(contentHash);
+      // 6. Build CMS SignedAttributes, hash, PSO COMPUTE DIGITAL SIGNATURE.
+      // CRITICAL-02 companion: RFC 5652 §5.4 requires the signature over
+      // DER(SET OF signedAttrs), not over the raw content.
+      final signedAttrs = CadesBuilder.prepareSignedAttributes(
+        contentXmlBytes: contentXmlBytes,
+        signerCertDer: certData,
+      );
+      final attrsHash = CadesBuilder.hashContentXml(signedAttrs);
+      final digestInfo = _buildDigestInfo(attrsHash);
       final sigApdu = _buildPsoComputeSignature(digestInfo);
       final sigResp = await _transceive(sigApdu);
       _checkSuccess(sigResp, SigningErrorCode.signingFailed,
@@ -110,6 +116,7 @@ class UsbOtgSigner implements SigningService {
       return SigningResult(
         signature: signatureBytes,
         certificate: certData,
+        signedAttributes: signedAttrs,
       );
     } finally {
       await _disconnect();

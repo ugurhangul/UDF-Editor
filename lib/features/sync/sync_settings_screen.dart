@@ -79,10 +79,16 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                 const SizedBox(height: 24),
 
                 // Provider cards
-                for (final provider in _providers) ...[
-                  _buildProviderCard(provider, colorScheme),
-                  const SizedBox(height: 12),
-                ],
+                // Provider cards
+                for (final provider in _providers)
+                  // CODE-10: Filter iCloud on non-Apple platforms before
+                  // building, not inside the builder.
+                  if (provider is! ICloudSync ||
+                      Platform.isIOS ||
+                      Platform.isMacOS) ...[
+                    _buildProviderCard(provider, colorScheme),
+                    const SizedBox(height: 12),
+                  ],
 
                 const SizedBox(height: 24),
 
@@ -127,11 +133,6 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
     final isAvailable = status != SyncStatus.disabled ||
         _authenticated[provider.name] == true;
 
-    // Hide iCloud on Android
-    if (provider is ICloudSync && !Platform.isIOS && !Platform.isMacOS) {
-      return const SizedBox.shrink();
-    }
-
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -163,6 +164,7 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
                       ),
                       if (isAuthenticated && userInfo != null)
                         Text(
+                          // CODE-09: Prefer email, fall back to displayName.
                           userInfo.email ?? userInfo.displayName,
                           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: colorScheme.onSurfaceVariant,
@@ -322,9 +324,10 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
         });
       }
     } catch (e) {
+      debugPrint('Bağlantı hatası (${provider.name}): $e');
       if (mounted) {
         setState(() {
-          _syncMessage = 'Bağlantı hatası: $e';
+          _syncMessage = 'Bağlantı kurulamadı. Lütfen tekrar deneyin.';
         });
       }
     }
@@ -363,10 +366,11 @@ class _SyncSettingsScreenState extends State<SyncSettingsScreen> {
         });
       }
     } catch (e) {
+      debugPrint('Senkronizasyon hatası (${provider.name}): $e');
       if (mounted) {
         setState(() {
           _syncStatus[provider.name] = SyncStatus.error;
-          _syncMessage = 'Senkronizasyon hatası: $e';
+          _syncMessage = 'Senkronizasyon başarısız oldu. Lütfen tekrar deneyin.';
         });
       }
     }

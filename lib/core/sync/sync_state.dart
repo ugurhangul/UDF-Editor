@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// Persistent local state for tracking sync history per file.
 ///
-/// Stores a JSON file at `{appDir}/sync_state.json` mapping each
-/// `.udf` filename to its last known sync state (hash + timestamps).
+/// Stores a JSON blob in secure storage (Keychain/Keystore) under the
+/// key `sync_state`, mapping each `.udf` filename to its last known
+/// sync state (hash + timestamps).
 ///
 /// Used by sync providers to determine which files need uploading,
 /// downloading, or conflict resolution.
@@ -17,14 +19,43 @@ class SyncState {
 
   static SyncState? _instance;
 
+  static const _secureStorage = FlutterSecureStorage();
+  static const _storageKey = 'sync_state';
+
   /// Load or create the sync state from disk.
   static Future<SyncState> load() async {
     if (_instance != null) return _instance!;
 
-    final file = await _stateFile();
-    if (await file.exists()) {
+    String? raw;
+    try {
+      raw = await _secureStorage.read(key: _storageKey);
+    } catch (_) {
+      // Keystore key lost (e.g. Android backup restore to a new device)
+      // makes the blob permanently unreadable — drop it so sync self-heals
+      // instead of throwing on every load.
       try {
-        final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+        await _secureStorage.delete(key: _storageKey);
+      } catch (_) {}
+    }
+
+    // MEDIUM-02: sync metadata moved to secure storage — plaintext JSON leaked file inventory on rooted devices.
+    if (raw == null) {
+      final legacyFile = await _legacyStateFile();
+      if (await legacyFile.exists()) {
+        try {
+          final legacyJson = await legacyFile.readAsString();
+          await _secureStorage.write(key: _storageKey, value: legacyJson);
+          raw = legacyJson;
+          await legacyFile.delete();
+        } catch (_) {
+          // Leave raw null; legacy file stays for a retry on next load.
+        }
+      }
+    }
+
+    if (raw != null) {
+      try {
+        final json = jsonDecode(raw) as Map<String, dynamic>;
         final entries = json.map((key, value) => MapEntry(
           key,
           SyncFileEntry.fromJson(value as Map<String, dynamic>),
@@ -66,26 +97,27 @@ class SyncState {
     return latest;
   }
 
-  /// Persist current state to disk.
+  /// Persist current state to disk. Never throws — the pre-secure-storage
+  /// implementation was no-throw and sync callers rely on that.
   Future<void> save() async {
-    final file = await _stateFile();
     final json = _entries.map((key, value) => MapEntry(key, value.toJson()));
-    await file.writeAsString(jsonEncode(json));
+    try {
+      await _secureStorage.write(key: _storageKey, value: jsonEncode(json));
+    } catch (_) {
+      // Best-effort — worst case the next sync re-uploads unchanged files.
+    }
   }
 
   /// Clear all tracked state.
   Future<void> clear() async {
     _entries.clear();
-    final file = await _stateFile();
-    if (await file.exists()) {
-      await file.delete();
-    }
+    await _secureStorage.delete(key: _storageKey);
   }
 
   /// Invalidate cached instance (for testing).
   static void resetInstance() => _instance = null;
 
-  static Future<File> _stateFile() async {
+  static Future<File> _legacyStateFile() async {
     final dir = await getApplicationDocumentsDirectory();
     return File('${dir.path}/sync_state.json');
   }

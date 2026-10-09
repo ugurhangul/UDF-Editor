@@ -87,7 +87,7 @@ class UdfDeltaConverter {
 
     // Current paragraph attributes (set by newline ops)
     UdfAlignment currentAlignment = UdfAlignment.left;
-    double currentLineSpacing = 1.0;
+    double currentLineSpacing = 0.0;
 
     for (final op in delta.toList()) {
       if (op.data is! String) continue;
@@ -131,7 +131,7 @@ class UdfDeltaConverter {
           ));
           currentRuns = [];
           currentAlignment = UdfAlignment.left;
-          currentLineSpacing = 1.0;
+          currentLineSpacing = 0.0;
         }
       }
     }
@@ -232,7 +232,8 @@ class UdfDeltaConverter {
     }
 
     // Line spacing is not natively in Quill — store as custom attribute
-    if (para.lineSpacing != 1.0) {
+    // (Swing additive factor; 0 = single spacing = default, omitted).
+    if (para.lineSpacing != 0.0) {
       attrs['line-height'] = para.lineSpacing;
     }
 
@@ -252,9 +253,9 @@ class UdfDeltaConverter {
 
   static double _attributesToLineSpacing(Map<String, dynamic> attrs) {
     final spacing = attrs['line-height'];
-    if (spacing == null) return 1.0;
+    if (spacing == null) return 0.0;
     if (spacing is num) return spacing.toDouble();
-    return double.tryParse(spacing.toString()) ?? 1.0;
+    return double.tryParse(spacing.toString()) ?? 0.0;
   }
 
   // ---------------------------------------------------------------------------

@@ -37,10 +37,36 @@ class CadesBuilder {
     return digest.process(contentXmlBytes);
   }
 
-  /// Build a complete CAdES-X-LONG CMS SignedData envelope.
+  /// Phase 1 of RFC 5652 §5.4 signing: build the SignedAttributes the
+  /// device must sign. Returns the DER-encoded SET OF Attribute (tag 0x31);
+  /// the signing device signs SHA-256 over exactly these bytes.
+  ///
+  /// Pass the result back via [SigningResult.signedAttributes] so
+  /// [buildSignedData] embeds the identical attributes (the signing-time
+  /// inside must match what was signed).
+  static Uint8List prepareSignedAttributes({
+    required Uint8List contentXmlBytes,
+    required Uint8List signerCertDer,
+    DateTime? signingTime,
+  }) {
+    final attrs = _buildSignedAttributes(
+      contentHash: hashContentXml(contentXmlBytes),
+      signingTime: signingTime ?? DateTime.now().toUtc(),
+      signerCertDer: signerCertDer,
+    );
+    return attrs.encodedBytes;
+  }
+
+  /// Build a complete CAdES CMS SignedData envelope.
   ///
   /// [contentXmlBytes] — Raw bytes of content.xml (the data being signed).
-  /// [signingResult] — Raw signature + certificate from the signing device.
+  /// [signingResult] — Signature + certificate from the signing device.
+  ///
+  /// CRITICAL-02 companion: when [SigningResult.signedAttributes] is set,
+  /// those exact bytes are embedded as signedAttrs [0] IMPLICIT (the
+  /// signature must cover them per RFC 5652 §5.4). When null (Mobil İmza:
+  /// device signed the content directly), signedAttrs are omitted so the
+  /// envelope stays cryptographically consistent.
   ///
   /// Returns DER-encoded CMS ContentInfo wrapping SignedData.
   Future<Uint8List> buildSignedData({
@@ -51,16 +77,6 @@ class CadesBuilder {
     if (certificate == null) {
       throw ArgumentError('SigningResult.certificate is required for CMS envelope');
     }
-
-    final contentHash = hashContentXml(contentXmlBytes);
-    final signingTime = DateTime.now().toUtc();
-
-    // ── 1. Build SignedAttributes ────────────────────────────────────────
-    final signedAttrs = _buildSignedAttributes(
-      contentHash: contentHash,
-      signingTime: signingTime,
-      signerCertDer: certificate,
-    );
 
     // ── 2. Build UnsignedAttributes (timestamp) ─────────────────────────
     ASN1Set? unsignedAttrs;
@@ -82,11 +98,18 @@ class CadesBuilder {
     final issuerAndSerial = _extractIssuerAndSerial(tbsCert);
 
     // ── 4. Build SignerInfo ──────────────────────────────────────────────
+    final signedAttrsDer = signingResult.signedAttributes;
     final signerInfo = ASN1Sequence()
       ..add(ASN1Integer.fromInt(1)) // version
       ..add(issuerAndSerial) // issuerAndSerialNumber
-      ..add(_sha256AlgorithmIdentifier()) // digestAlgorithm
-      ..add(_wrapImplicit(0, signedAttrs)) // signedAttrs [0] IMPLICIT
+      ..add(_sha256AlgorithmIdentifier()); // digestAlgorithm
+    if (signedAttrsDer != null) {
+      // signedAttrs [0] IMPLICIT — exact bytes the device signed
+      signerInfo.add(
+        _wrapImplicit(0, ASN1Parser(signedAttrsDer).nextObject()),
+      );
+    }
+    signerInfo
       ..add(_rsaSha256AlgorithmIdentifier()) // signatureAlgorithm
       ..add(ASN1OctetString(signingResult.signature)); // signature
 
@@ -120,7 +143,7 @@ class CadesBuilder {
 
   // ── Private helpers ───────────────────────────────────────────────────
 
-  ASN1Set _buildSignedAttributes({
+  static ASN1Set _buildSignedAttributes({
     required Uint8List contentHash,
     required DateTime signingTime,
     required Uint8List signerCertDer,
@@ -179,13 +202,13 @@ class CadesBuilder {
       ..add(serialNumber);
   }
 
-  ASN1Sequence _sha256AlgorithmIdentifier() {
+  static ASN1Sequence _sha256AlgorithmIdentifier() {
     return ASN1Sequence()
       ..add(ASN1ObjectIdentifier.fromComponentString(_oidSha256))
       ..add(ASN1Null());
   }
 
-  ASN1Sequence _rsaSha256AlgorithmIdentifier() {
+  static ASN1Sequence _rsaSha256AlgorithmIdentifier() {
     return ASN1Sequence()
       ..add(ASN1ObjectIdentifier.fromComponentString(_oidSha256WithRsa))
       ..add(ASN1Null());
